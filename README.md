@@ -43,7 +43,7 @@ things the surface-level analysis missed:
 ```
 main            -> App (orchestrator)
 App             -> Cli, Logger, Diagnostics, WineDetection,
-                   ProcessLauncher, Injector, ErrorFormatter
+                   ProcessLauncher, Injector, Monitor, ErrorFormatter
 Win32Helpers    -> ScopedHandle / RemoteMemory RAII + error formatting
 ```
 
@@ -166,3 +166,13 @@ sampcmd --monitor -- -c -n MyNick -h 127.0.0.1 -p 7777
 
 The application icon is generated from the game's `samp.png` at build time
 (`res/sampcmd.ico`).
+
+## Continuous integration
+
+`.gitlab-ci.yml` builds the 32-bit `sampcmd.exe` on every push using the pinned
+llvm-mingw toolchain and publishes it as a job artifact (requires CI/CD + shared
+runners enabled on the project).
+
+## License
+
+MIT — see [LICENSE](LICENSE).

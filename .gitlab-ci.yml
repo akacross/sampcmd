@@ -1,0 +1,40 @@
+# Builds the 32-bit sampcmd.exe on every push, using the same pinned llvm-mingw
+# toolchain the project is verified against, and publishes the exe as a job
+# artifact. (Requires CI/CD + shared runners to be enabled on the project.)
+
+stages:
+  - build
+
+variables:
+  # Pinned toolchain: clang/lld + MinGW headers/import libs, self-contained.
+  LLVM_MINGW: "llvm-mingw-20260616-ucrt-ubuntu-22.04-x86_64"
+
+build:
+  stage: build
+  image: debian:stable-slim
+  cache:
+    key: "$LLVM_MINGW"
+    paths:
+      - .cache/toolchain.tar.xz
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends
+        curl ca-certificates xz-utils cmake ninja-build file
+    - mkdir -p .cache .toolchain
+    - test -f .cache/toolchain.tar.xz ||
+        curl -fsSL "https://github.com/mstorsjo/llvm-mingw/releases/download/20260616/${LLVM_MINGW}.tar.xz"
+        -o .cache/toolchain.tar.xz
+    - tar -C .toolchain -xf .cache/toolchain.tar.xz
+  script:
+    - export PATH="$CI_PROJECT_DIR/.toolchain/${LLVM_MINGW}/bin:$PATH"
+    - cmake -B build -G Ninja
+        -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-mingw-i686.cmake
+        -DCMAKE_BUILD_TYPE=Release
+    - cmake --build build --parallel
+    - file build/sampcmd.exe
+    - test -f build/sampcmd.exe
+  artifacts:
+    name: "sampcmd-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - build/sampcmd.exe
+    expire_in: 90 days
