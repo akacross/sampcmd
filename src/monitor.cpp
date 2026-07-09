@@ -1,0 +1,356 @@
+#include "windows_prelude.hpp"
+#include "monitor.hpp"
+#include "logger.hpp"
+#include "win32_helpers.hpp"
+
+#include <psapi.h>
+
+#include <algorithm>
+#include <format>
+
+namespace monitor {
+
+namespace {
+
+constexpr size_t kMaxDebugStrings = 8;
+constexpr size_t kMaxExceptions   = 6;
+
+// Resolve a module's on-disk name from its base address in the target.
+std::wstring module_name(HANDLE process, uintptr_t base) {
+    wchar_t path[MAX_PATH];
+    if (::GetModuleFileNameExW(process, reinterpret_cast<HMODULE>(base), path,
+                               static_cast<DWORD>(std::size(path)))) {
+        std::wstring full(path);
+        auto slash = full.find_last_of(L"\\/");
+        return slash == std::wstring::npos ? full : full.substr(slash + 1);
+    }
+    // Wine sometimes hides the name behind GetModuleFileNameEx; fall back to the
+    // mapped file path.
+    if (::GetMappedFileNameW(process, reinterpret_cast<void*>(base), path,
+                             static_cast<DWORD>(std::size(path)))) {
+        std::wstring full(path);
+        auto slash = full.find_last_of(L"\\/");
+        return slash == std::wstring::npos ? full : full.substr(slash + 1);
+    }
+    return L"?";
+}
+
+uintptr_t module_size(HANDLE process, uintptr_t base) {
+    MODULEINFO mi{};
+    if (::GetModuleInformation(process, reinterpret_cast<HMODULE>(base), &mi, sizeof(mi)))
+        return mi.SizeOfImage;
+    return 0;
+}
+
+void record_module(std::vector<ModuleRec>& mods, HANDLE process, uintptr_t base) {
+    if (!base) return;
+    ModuleRec m;
+    m.base = base;
+    m.size = module_size(process, base);
+    m.name = module_name(process, base);
+    mods.push_back(std::move(m));
+}
+
+// Maps a faulting address to the containing module.
+void locate(const std::vector<ModuleRec>& mods, ExceptionRec& ex) {
+    const ModuleRec* best = nullptr;
+    for (const auto& m : mods) {
+        if (m.size) {
+            if (ex.address >= m.base && ex.address < m.base + m.size) { best = &m; break; }
+        } else if (ex.address >= m.base && (!best || m.base > best->base)) {
+            best = &m;  // no size known: nearest base below the address
+        }
+    }
+    if (best) {
+        ex.module = best->name;
+        ex.module_offset = ex.address - best->base;
+    } else {
+        ex.module = L"?";
+        ex.module_offset = ex.address;
+    }
+}
+
+std::wstring read_debug_string(HANDLE process, const OUTPUT_DEBUG_STRING_INFO& info) {
+    DWORD n = info.nDebugStringLength;
+    if (n == 0 || n > 4096) n = std::min<DWORD>(n, 4096);
+    std::string bytes(n, '\0');
+    SIZE_T got = 0;
+    if (!::ReadProcessMemory(process, info.lpDebugStringData, bytes.data(), n, &got))
+        return {};
+    bytes.resize(got);
+    std::wstring out;
+    if (info.fUnicode) {
+        out.assign(reinterpret_cast<const wchar_t*>(bytes.data()), got / sizeof(wchar_t));
+    } else {
+        out.reserve(got);
+        for (char c : bytes) out.push_back(static_cast<unsigned char>(c));
+    }
+    // Trim trailing whitespace/newlines the caller doesn't want.
+    while (!out.empty() && (out.back() == L'\r' || out.back() == L'\n' ||
+                            out.back() == L' ' || out.back() == L'\0'))
+        out.pop_back();
+    return out;
+}
+
+} // namespace
+
+bool is_crash_status(DWORD code) {
+    // NTSTATUS error severity (top two bits set) => a crash/abnormal termination.
+    // Plain application exit codes (0, small ints) are not crashes.
+    return (code & 0xC0000000u) == 0xC0000000u ||
+           code == 0x40000015u /* FATAL_APP_EXIT */;
+}
+
+std::wstring decode_status(DWORD code) {
+    switch (code) {
+        case 0x00000000: return L"OK (normal exit)";
+        case 0x00000001: return L"exit code 1";
+        case 0x00000003: return L"exit code 3 (abort/CRT)";
+        case 0x40000015: return L"FATAL_APP_EXIT";
+        case 0x40010005: return L"CONTROL_C_EXIT";
+        case 0x80000003: return L"BREAKPOINT";
+        case 0x80000004: return L"SINGLE_STEP";
+        case 0xC0000005: return L"ACCESS_VIOLATION (bad memory access)";
+        case 0xC0000006: return L"IN_PAGE_ERROR";
+        case 0xC000001D: return L"ILLEGAL_INSTRUCTION";
+        case 0xC0000025: return L"NONCONTINUABLE_EXCEPTION";
+        case 0xC0000094: return L"INTEGER_DIVIDE_BY_ZERO";
+        case 0xC0000095: return L"INTEGER_OVERFLOW";
+        case 0xC00000FD: return L"STACK_OVERFLOW";
+        case 0xC0000135: return L"DLL_NOT_FOUND (a required DLL is missing)";
+        case 0xC0000139: return L"ENTRYPOINT_NOT_FOUND";
+        case 0xC0000142: return L"DLL_INIT_FAILED (a DLL's init routine failed)";
+        case 0xC0000374: return L"HEAP_CORRUPTION";
+        case 0xC0000409: return L"STACK_BUFFER_OVERRUN / __fastfail";
+        case 0xC000041D: return L"FATAL_USER_CALLBACK_EXCEPTION";
+        default:
+            if (is_crash_status(code))
+                return std::format(L"crash status 0x{:08X}", code);
+            return std::format(L"exit code {} (0x{:08X})", code, code);
+    }
+}
+
+Result watch(HANDLE process, uint64_t launch_tick, DWORD timeout_ms, bool wait_full,
+             Logger& log) {
+    Result r;
+    log.section(L"Monitor");
+    if (wait_full)
+        log.info(L"watching process until it exits (--watch)");
+    else
+        log.infof(L"startup watchdog: watching for early exit ({} ms)", timeout_ms);
+
+    const DWORD w = ::WaitForSingleObject(process, wait_full ? INFINITE : timeout_ms);
+    r.run_ms = ::GetTickCount64() - launch_tick;
+
+    if (w == WAIT_OBJECT_0) {
+        r.process_exited = true;
+        DWORD code = 0;
+        ::GetExitCodeProcess(process, &code);
+        r.exit_code = code;
+        log.infof(L"process exited after {} ms with status {} ({})",
+                  r.run_ms, code, decode_status(code));
+    } else if (w == WAIT_TIMEOUT) {
+        log.infof(L"process still running after {} ms - looks healthy, detaching",
+                  r.run_ms);
+    } else {
+        log.warnf(L"WaitForSingleObject returned 0x{:08X}", w);
+    }
+    return r;
+}
+
+Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
+                      const std::function<void()>& resume, Logger& log) {
+    Result r;
+    r.attached = true;
+    log.section(L"Monitor (gdb-lite)");
+
+    // Keep the game alive if the launcher/debugger goes away.
+    ::DebugSetProcessKillOnExit(FALSE);
+
+    if (!::DebugActiveProcess(pid)) {
+        log.warnf(L"DebugActiveProcess failed: {} - falling back to plain watch",
+                  win32::last_error());
+        resume();
+        return watch(process, launch_tick, 10000, true, log);
+    }
+    log.infof(L"attached debugger to pid {}", pid);
+
+    // Now that we are attached, let the game run.
+    resume();
+
+    // Tracks a repeating first-chance fault so we can break the "unhandled
+    // access-violation re-delivered forever" loop that a debugger otherwise hits.
+    uintptr_t last_fault_addr = 0;
+    DWORD     last_fault_code = 0;
+    int       fault_repeats   = 0;
+    bool      terminating     = false;
+
+    for (;;) {
+        DEBUG_EVENT ev{};
+        // Once we've killed the target, keep pumping (with a bound) so the debug
+        // session tears down cleanly and the launcher can exit promptly.
+        if (!::WaitForDebugEvent(&ev, terminating ? 5000 : INFINITE)) {
+            if (!terminating)
+                log.warnf(L"WaitForDebugEvent failed: {}", win32::last_error());
+            break;
+        }
+        DWORD cont = DBG_CONTINUE;
+
+        switch (ev.dwDebugEventCode) {
+            case CREATE_PROCESS_DEBUG_EVENT: {
+                record_module(r.modules, process,
+                              reinterpret_cast<uintptr_t>(ev.u.CreateProcessInfo.lpBaseOfImage));
+                if (ev.u.CreateProcessInfo.hFile) ::CloseHandle(ev.u.CreateProcessInfo.hFile);
+                break;
+            }
+            case LOAD_DLL_DEBUG_EVENT: {
+                auto base = reinterpret_cast<uintptr_t>(ev.u.LoadDll.lpBaseOfDll);
+                record_module(r.modules, process, base);
+                const auto& m = r.modules.back();
+                if (m.name.size() >= 8) {
+                    std::wstring lower = m.name;
+                    std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
+                    if (lower.find(L"samp.dll") != std::wstring::npos) r.samp_loaded = true;
+                }
+                log.tracef(L"module loaded : {} @ {:#010x}", m.name, base);
+                if (ev.u.LoadDll.hFile) ::CloseHandle(ev.u.LoadDll.hFile);
+                break;
+            }
+            case OUTPUT_DEBUG_STRING_EVENT: {
+                std::wstring s = read_debug_string(process, ev.u.DebugString);
+                if (!s.empty()) {
+                    log.tracef(L"OutputDebugString: {}", s);
+                    r.debug_strings.push_back(std::move(s));
+                    if (r.debug_strings.size() > kMaxDebugStrings)
+                        r.debug_strings.erase(r.debug_strings.begin());
+                }
+                break;
+            }
+            case EXCEPTION_DEBUG_EVENT: {
+                const auto& er = ev.u.Exception.ExceptionRecord;
+                const DWORD ec = er.ExceptionCode;
+                const bool first = ev.u.Exception.dwFirstChance != 0;
+
+                // Already killing the target - swallow anything still in flight.
+                if (terminating) { cont = DBG_CONTINUE; break; }
+
+                // Breakpoints/single-steps (attach BP, WOW64 BP, DebugBreak) aren't
+                // crashes - swallow them.
+                if (ec == EXCEPTION_BREAKPOINT || ec == 0x4000001F /*WX86 BP*/ ||
+                    ec == EXCEPTION_SINGLE_STEP) {
+                    cont = DBG_CONTINUE;
+                    break;
+                }
+
+                // Hard faults are NTSTATUS 0xC0000xxx (access violation, illegal
+                // instruction, ...). Benign first-chance exceptions - C++/CLR EH
+                // (0xE.......), thread-name (0x406D1388), guard-page - are passed
+                // straight through so the app handles them normally.
+                const bool hard = (ec & 0xF0000000u) == 0xC0000000u;
+                if (!hard) { cont = DBG_EXCEPTION_NOT_HANDLED; break; }
+
+                const uintptr_t addr = reinterpret_cast<uintptr_t>(er.ExceptionAddress);
+                if (first && ec == last_fault_code && addr == last_fault_addr)
+                    ++fault_repeats;
+                else { fault_repeats = 1; last_fault_code = ec; last_fault_addr = addr; }
+
+                ExceptionRec x;
+                x.code = ec; x.address = addr; x.first_chance = first;
+                locate(r.modules, x);
+
+                // Fatal when the app didn't handle it: it arrived as last-chance,
+                // or the same first-chance fault looped back to us unresolved.
+                if (!first || fault_repeats >= 2) {
+                    log.errorf(L"unhandled {:#010x} ({}) at {}+{:#x} - terminating target",
+                               ec, decode_status(ec), x.module, x.module_offset);
+                    r.exceptions.push_back(std::move(x));
+                    ::TerminateProcess(process, ec);
+                    terminating = true;
+                    r.process_exited = true;
+                    r.exit_code = ec;
+                    r.run_ms = ::GetTickCount64() - launch_tick;
+                    // Don't return yet - fall through to drain to EXIT_PROCESS.
+                    cont = DBG_CONTINUE;
+                    break;
+                }
+
+                // First sighting: record it, then give the app's own handler
+                // (e.g. crashes.asi) a chance before we decide it's fatal.
+                log.debugf(L"first-chance {:#010x} ({}) at {}+{:#x}",
+                           ec, decode_status(ec), x.module, x.module_offset);
+                r.exceptions.push_back(std::move(x));
+                if (r.exceptions.size() > kMaxExceptions)
+                    r.exceptions.erase(r.exceptions.begin());
+                cont = DBG_EXCEPTION_NOT_HANDLED;
+                break;
+            }
+            case EXIT_PROCESS_DEBUG_EVENT: {
+                r.process_exited = true;
+                r.exit_code = ev.u.ExitProcess.dwExitCode;
+                r.run_ms = ::GetTickCount64() - launch_tick;
+                log.infof(L"process exited after {} ms with status {} ({})",
+                          r.run_ms, r.exit_code, decode_status(r.exit_code));
+                ::ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, DBG_CONTINUE);
+                return r;
+            }
+            default:
+                break;
+        }
+        ::ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, cont);
+    }
+
+    if (!r.run_ms) r.run_ms = ::GetTickCount64() - launch_tick;
+    return r;
+}
+
+std::wstring format_report(const ReportContext& ctx, const Result& r) {
+    const bool crashed = r.process_exited && is_crash_status(r.exit_code);
+
+    std::wstring outcome;
+    if (!r.process_exited)
+        outcome = std::format(L"STILL RUNNING after {} ms (healthy)", r.run_ms);
+    else if (crashed)
+        outcome = std::format(L"CRASHED after {} ms", r.run_ms);
+    else if (r.exit_code == 0)
+        outcome = std::format(L"exited cleanly after {} ms", r.run_ms);
+    else
+        outcome = std::format(L"exited abnormally after {} ms", r.run_ms);
+
+    std::wstring b;
+    b += L"===== SAMPCMD REPORT (copy everything between the lines) =====\n";
+    b += std::format(L"sampcmd     : {}\n", ctx.version);
+    b += std::format(L"os / wine   : {} | {}\n", ctx.os, ctx.wine);
+    b += std::format(L"target      : {}\n", ctx.target);
+    b += std::format(L"outcome     : {}\n", outcome);
+    if (r.process_exited)
+        b += std::format(L"exit/status : 0x{:08X}  {}\n", r.exit_code, decode_status(r.exit_code));
+
+    // The most telling exception: prefer a last-chance one, else the latest.
+    if (!r.exceptions.empty()) {
+        const ExceptionRec* pick = &r.exceptions.back();
+        for (auto it = r.exceptions.rbegin(); it != r.exceptions.rend(); ++it)
+            if (!it->first_chance) { pick = &*it; break; }
+        b += std::format(L"fault       : 0x{:08X} {} at {}+0x{:X}\n",
+                         pick->code, decode_status(pick->code), pick->module,
+                         pick->module_offset);
+        if (r.exceptions.size() > 1)
+            b += std::format(L"exceptions  : {} seen (showing the fatal one)\n",
+                             r.exceptions.size());
+    }
+
+    if (r.attached)
+        b += std::format(L"modules     : {} loaded | samp.dll {}\n",
+                         r.modules.size(), r.samp_loaded ? L"LOADED" : L"NOT loaded");
+
+    if (!r.debug_strings.empty()) {
+        b += L"last output :\n";
+        for (const auto& s : r.debug_strings)
+            b += std::format(L"  > {}\n", s);
+    }
+
+    b += std::format(L"log file    : {}\n", ctx.log_path);
+    b += L"===== END REPORT =====";
+    return b;
+}
+
+} // namespace monitor

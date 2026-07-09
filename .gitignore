@@ -1,0 +1,7 @@
+/build/
+*.o
+*.obj
+*.exe
+!*.orig
+launcher.log
+compile_commands.json
