@@ -20,7 +20,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr wchar_t kVersion[] = L"2.0.0";
+constexpr wchar_t kVersion[] = L"2.1.0";
 
 // Quotes a single argument per the CommandLineToArgvW / MSVCRT rules so that
 // arguments containing spaces or quotes survive the round trip into gta_sa.exe.
@@ -76,6 +76,7 @@ App::Paths App::resolve_paths(const CliOptions& opts) const {
     };
     p.exe = resolve(opts.exe_name, L"gta_sa.exe");
     p.dll = resolve(opts.dll_name, L"samp.dll");
+    p.omp = resolve(opts.omp_dll, L"omp-client.dll");
 
     // Log next to the launcher, named after it (sampcmd.exe -> sampcmd.log), so
     // it is easy to find and follows the exe if it is renamed.
@@ -158,6 +159,7 @@ int App::run() {
     bool ok = true;
     ok &= require_file(paths.exe, L"gta_sa.exe");
     ok &= require_file(paths.dll, L"samp.dll");
+    if (opts.omp) ok &= require_file(paths.omp, L"omp-client.dll");
     if (!ok) {
         err.report(L"Missing files",
                    L"Required files were not found. Is the launcher in the game folder?",
@@ -184,34 +186,43 @@ int App::run() {
     auto proc = launcher.create_suspended(paths.exe, child_cmd, paths.game_dir);
     if (!proc) return 4;
 
-    // Inject (unless disabled).
+    // Inject (unless disabled). Order matters: samp.dll first, then omp-client.dll
+    // for open.mp - it locates and layers on top of an already-loaded samp.dll.
     if (opts.no_inject) {
         logger_.warn(L"--no-inject: skipping DLL injection");
     } else {
         Injector injector(logger_, err);
-        InjectionResult inj = injector.inject(proc->process.get(), proc->pid, paths.dll);
-        if (!inj.success) {
-            logger_.errorf(L"injection failed at stage: {}", inj.failed_stage);
-            if (opts.kill_on_inject_fail) {
-                logger_.warn(L"terminating gta_sa.exe so the failure is visible (not a silent exit)");
-                ::TerminateProcess(proc->process.get(), 1);
-            } else {
-                logger_.warn(L"--no-kill-on-fail: resuming GTA anyway (will likely exit on its own)");
-                launcher.resume(*proc);
+        std::vector<std::filesystem::path> dlls = { paths.dll };
+        if (opts.omp) dlls.push_back(paths.omp);
+
+        for (const auto& dll : dlls) {
+            InjectionResult inj = injector.inject(proc->process.get(), proc->pid, dll);
+            if (!inj.success) {
+                logger_.errorf(L"injection failed at stage: {}", inj.failed_stage);
+                if (opts.kill_on_inject_fail) {
+                    logger_.warn(L"terminating gta_sa.exe so the failure is visible (not a silent exit)");
+                    ::TerminateProcess(proc->process.get(), 1);
+                } else {
+                    logger_.warn(L"--no-kill-on-fail: resuming GTA anyway (will likely exit on its own)");
+                    launcher.resume(*proc);
+                }
+                return 5;
             }
-            return 5;
         }
     }
 
     // Context for any report we might emit.
+    const std::wstring injected =
+        opts.no_inject ? L" [not injected]"
+                       : (opts.omp ? L" [samp.dll + omp-client.dll injected]"
+                                   : L" [samp.dll injected]");
     monitor::ReportContext rc{
         kVersion,
         diagnostics::os_version_string(),
         wine.is_wine
             ? std::format(L"Wine {} ({} {})", wine.version, wine.host_system, wine.host_release)
             : L"native Windows",
-        paths.exe.filename().wstring() +
-            (opts.no_inject ? L" [not injected]" : L" [samp.dll injected]"),
+        paths.exe.filename().wstring() + injected,
         paths.log.wstring(),
     };
 
@@ -236,7 +247,7 @@ int App::run() {
             // Monitoring disabled: fire and forget.
             logger_.section(L"Done");
             logger_.infof(L"gta_sa.exe launched (pid {}){}", proc->pid,
-                          opts.no_inject ? L" without injection" : L" with samp.dll injected");
+                          injected);
             return 0;
         }
         mon = monitor::watch(proc->process.get(), launch_tick,
@@ -258,7 +269,7 @@ int App::run() {
     logger_.section(L"Done");
     if (!mon.process_exited) {
         logger_.infof(L"gta_sa.exe running (pid {}){}", proc->pid,
-                      opts.no_inject ? L" without injection" : L" with samp.dll injected");
+                      injected);
         return 0;
     }
     logger_.infof(L"gta_sa.exe (pid {}) ended with status 0x{:08X}", proc->pid, mon.exit_code);

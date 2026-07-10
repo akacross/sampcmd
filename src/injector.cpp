@@ -132,8 +132,8 @@ InjectionResult Injector::inject(HANDLE process, DWORD pid, const fs::path& dll_
         return r;
     }
 
-    log_.infof(L"LoadLibraryW OK: samp.dll loaded at HMODULE {:#010x} in target",
-               exit_code);
+    log_.infof(L"LoadLibraryW OK: {} loaded at HMODULE {:#010x} in target",
+               dll_path.filename().wstring(), exit_code);
     r.success = true;
     return r;
 }

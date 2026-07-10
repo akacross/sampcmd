@@ -18,6 +18,7 @@ private:
         std::filesystem::path game_dir;
         std::filesystem::path exe;
         std::filesystem::path dll;
+        std::filesystem::path omp;   // omp-client.dll (only used with -omp)
         std::filesystem::path log;
     };
     Paths resolve_paths(const CliOptions& opts) const;

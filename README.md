@@ -87,6 +87,17 @@ else are forwarded to `gta_sa.exe`, so the existing SA:MP invocation still works
 sampcmd -c -n MyNick -h 127.0.0.1 -p 7777
 ```
 
+### open.mp
+
+Pass `-omp` to also inject `omp-client.dll` (from the game folder) **after**
+`samp.dll` — open.mp layers on top of an already-loaded samp.dll. The connection
+flags are unchanged; `-omp` is consumed by the launcher and not forwarded to GTA.
+
+```sh
+sampcmd -omp -c -n MyNick -h 127.0.0.1 -p 7777
+# custom path: sampcmd -omp --omp-dll "C:\path\to\omp-client.dll" -c -n ... -h ... -p ...
+```
+
 ### Diagnosing the "exits immediately" problem
 
 ```sh
@@ -147,6 +158,8 @@ sampcmd --monitor -- -c -n MyNick -h 127.0.0.1 -p 7777
 
 | Option | Effect |
 | --- | --- |
+| `-omp`, `--omp` | Also inject `omp-client.dll` (after `samp.dll`) for open.mp |
+| `--omp-dll <name\|path>` | open.mp DLL to inject (default `omp-client.dll`) |
 | `--no-inject` | Launch GTA but skip DLL injection |
 | `--dry-run` | Validate files + log the plan; do not launch |
 | `--debug`, `--verbose` | Verbose (Debug/Trace) logging |

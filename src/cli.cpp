@@ -37,6 +37,10 @@ CliOptions parse_args(const std::vector<std::wstring>& argv) {
 
         if (raw == L"--") { forward_rest = true; continue; }
 
+        // open.mp toggle. Accepted with either dash count for convenience; it is
+        // a launcher directive (inject omp-client.dll), not forwarded to GTA.
+        if (raw == L"-omp" || raw == L"--omp") { o.omp = true; continue; }
+
         // Only long "--" options are launcher-owned. Single-dash and bare tokens
         // belong to gta_sa.exe.
         if (raw.size() >= 2 && raw[0] == L'-' && raw[1] == L'-') {
@@ -65,6 +69,7 @@ CliOptions parse_args(const std::vector<std::wstring>& argv) {
             else if (n == L"--game-dir")  { if (!take_value(i, s, n, o.game_dir)) return o; }
             else if (n == L"--exe")       { if (!take_value(i, s, n, o.exe_name)) return o; }
             else if (n == L"--dll")       { if (!take_value(i, s, n, o.dll_name)) return o; }
+            else if (n == L"--omp-dll")   { if (!take_value(i, s, n, o.omp_dll)) return o; }
             else if (n == L"--log")       { if (!take_value(i, s, n, o.log_path)) return o; }
             else {
                 o.parse_error = std::format(L"unknown option: {}", n);
@@ -100,6 +105,8 @@ std::wstring usage_text() {
         L"  sampcmd [launcher-options] [-- ] [gta_sa.exe arguments...]\n"
         L"\n"
         L"Launcher options:\n"
+        L"  -omp, --omp          Also inject omp-client.dll (after samp.dll) for open.mp\n"
+        L"  --omp-dll <name|path> open.mp DLL to inject (default omp-client.dll)\n"
         L"  --no-inject          Launch gta_sa.exe but do not inject samp.dll\n"
         L"  --dry-run            Validate files and log the plan; do not launch\n"
         L"  --debug, --verbose   Verbose logging (Debug/Trace levels)\n"

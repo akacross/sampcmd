@@ -32,10 +32,14 @@ struct CliOptions {
     bool report    = false;   // --report: emit the report block even on clean exit
     unsigned grace_ms = 8000; // --grace <sec>: startup-watchdog window (0 disables)
 
+    // open.mp: also inject omp-client.dll after samp.dll.
+    bool omp = false;                      // -omp / --omp
+
     // Path overrides (all optional; defaults derive from the launcher directory).
     std::optional<std::wstring> game_dir;  // --game-dir <path>
     std::optional<std::wstring> exe_name;  // --exe <name-or-path>  (default gta_sa.exe)
     std::optional<std::wstring> dll_name;  // --dll <name-or-path>  (default samp.dll)
+    std::optional<std::wstring> omp_dll;   // --omp-dll <name-or-path> (default omp-client.dll)
     std::optional<std::wstring> log_path;  // --log <path>          (default launcher.log)
 
     // Arguments to forward to gta_sa.exe (SA:MP connect flags, etc.).
