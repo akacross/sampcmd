@@ -92,6 +92,8 @@ sampcmd -c -n MyNick -h 127.0.0.1 -p 7777
 Pass `-omp` to also inject `omp-client.dll` (from the game folder) **after**
 `samp.dll` — open.mp layers on top of an already-loaded samp.dll. The connection
 flags are unchanged; `-omp` is consumed by the launcher and not forwarded to GTA.
+It may appear **anywhere** on the command line — including after `--` — so it can
+sit alongside the connect flags.
 
 ```sh
 sampcmd -omp -c -n MyNick -h 127.0.0.1 -p 7777

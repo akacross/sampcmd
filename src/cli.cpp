@@ -33,13 +33,14 @@ CliOptions parse_args(const std::vector<std::wstring>& argv) {
     for (size_t i = 1; i < argv.size(); ++i) {
         const std::wstring& raw = argv[i];
 
+        // open.mp toggle. It is a launcher directive (inject omp-client.dll), not a
+        // GTA argument, so it is recognized ANYWHERE - even after "--" - and is
+        // never forwarded. Accepted with either dash count for convenience.
+        if (raw == L"-omp" || raw == L"--omp") { o.omp = true; continue; }
+
         if (forward_rest) { o.forwarded.push_back(raw); continue; }
 
         if (raw == L"--") { forward_rest = true; continue; }
-
-        // open.mp toggle. Accepted with either dash count for convenience; it is
-        // a launcher directive (inject omp-client.dll), not forwarded to GTA.
-        if (raw == L"-omp" || raw == L"--omp") { o.omp = true; continue; }
 
         // Only long "--" options are launcher-owned. Single-dash and bare tokens
         // belong to gta_sa.exe.
