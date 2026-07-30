@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <format>
+#include <string_view>
 
 namespace monitor {
 
@@ -14,6 +15,29 @@ namespace {
 
 constexpr size_t kMaxDebugStrings = 8;
 constexpr size_t kMaxExceptions   = 6;
+constexpr size_t kMaxTailAfterFault = 4;  // trailing lines shown alongside fault context
+
+// True for a line that looks like a plugin mirroring its own log file into the
+// debug channel: CLEO (cleo.asi) passes every cleo.log line to
+// OutputDebugString, prefixed "dd/mm/yyyy HH:MM:SS.mmm ". It emits dozens of
+// them per session - enough to evict everything the game itself said from the
+// ring buffer - so they stay out of the report unless --all-output is given.
+// The trace log keeps them regardless, and cleo.log has them anyway.
+bool is_mirrored_log_line(std::wstring_view s) {
+    auto digits = [s](size_t off, size_t n) {
+        for (size_t i = off; i < off + n; ++i)
+            if (s[i] < L'0' || s[i] > L'9') return false;
+        return true;
+    };
+    //                 0         1         2
+    //                 0123456789012345678901234
+    // shape required: dd/mm/yyyy HH:MM:SS.mmm<sp>
+    if (s.size() < 24) return false;
+    return digits(0, 2) && s[2] == L'/' && digits(3, 2) && s[5] == L'/' &&
+           digits(6, 4) && s[10] == L' ' && digits(11, 2) && s[13] == L':' &&
+           digits(14, 2) && s[16] == L':' && digits(17, 2) && s[19] == L'.' &&
+           digits(20, 3) && s[23] == L' ';
+}
 
 // Resolve a module's on-disk name from its base address in the target.
 std::wstring module_name(HANDLE process, uintptr_t base) {
@@ -159,7 +183,8 @@ Result watch(HANDLE process, uint64_t launch_tick, DWORD timeout_ms, bool wait_f
 }
 
 Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
-                      const std::function<void()>& resume, Logger& log) {
+                      const std::function<void()>& resume, Logger& log,
+                      bool keep_all_output) {
     Result r;
     r.attached = true;
     log.section(L"Monitor (gdb-lite)");
@@ -184,6 +209,9 @@ Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
     DWORD     last_fault_code = 0;
     int       fault_repeats   = 0;
     bool      terminating     = false;
+    // The debug output around the first hard fault is what actually explains a
+    // crash; the ring buffer alone would have rotated it away by exit time.
+    bool      fault_context_taken = false;
 
     for (;;) {
         DEBUG_EVENT ev{};
@@ -219,10 +247,17 @@ Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
             case OUTPUT_DEBUG_STRING_EVENT: {
                 std::wstring s = read_debug_string(process, ev.u.DebugString);
                 if (!s.empty()) {
+                    // The trace log always gets the line; the report's ring buffer
+                    // only gets it if it isn't a plugin echoing its own log file.
                     log.tracef(L"OutputDebugString: {}", s);
+                    if (!keep_all_output && is_mirrored_log_line(s)) {
+                        ++r.debug_strings_omitted;
+                        break;
+                    }
                     r.debug_strings.push_back(std::move(s));
                     if (r.debug_strings.size() > kMaxDebugStrings)
                         r.debug_strings.erase(r.debug_strings.begin());
+                    if (fault_context_taken) ++r.lines_after_fault;
                 }
                 break;
             }
@@ -258,11 +293,22 @@ Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
                 x.code = ec; x.address = addr; x.first_chance = first;
                 locate(r.modules, x);
 
+                // Freeze what the game had said up to this point, before the
+                // shutdown chatter that follows a crash pushes it out.
+                if (!fault_context_taken) {
+                    fault_context_taken = true;
+                    r.fault_context = r.debug_strings;
+                }
+
                 // Fatal when the app didn't handle it: it arrived as last-chance,
                 // or the same first-chance fault looped back to us unresolved.
                 if (!first || fault_repeats >= 2) {
                     log.errorf(L"unhandled {:#010x} ({}) at {}+{:#x} - terminating target",
                                ec, decode_status(ec), x.module, x.module_offset);
+                    // Re-anchor the output snapshot on the fault that actually
+                    // killed the game, not on some earlier one the app handled.
+                    r.fault_context = r.debug_strings;
+                    r.lines_after_fault = 0;
                     r.exceptions.push_back(std::move(x));
                     ::TerminateProcess(process, ec);
                     terminating = true;
@@ -342,11 +388,27 @@ std::wstring format_report(const ReportContext& ctx, const Result& r) {
         b += std::format(L"modules     : {} loaded | samp.dll {}\n",
                          r.modules.size(), r.samp_loaded ? L"LOADED" : L"NOT loaded");
 
-    if (!r.debug_strings.empty()) {
+    // Prefer the output as it stood at the fault - the tail of the ring buffer is
+    // usually just teardown noise from whatever ran after the crash.
+    if (!r.fault_context.empty()) {
+        b += L"output@fault:\n";
+        for (const auto& s : r.fault_context)
+            b += std::format(L"  > {}\n", s);
+        const size_t tail = std::min({r.lines_after_fault, r.debug_strings.size(),
+                                      kMaxTailAfterFault});
+        if (tail) {
+            b += L"  ... then:\n";
+            for (size_t i = r.debug_strings.size() - tail; i < r.debug_strings.size(); ++i)
+                b += std::format(L"  > {}\n", r.debug_strings[i]);
+        }
+    } else if (!r.debug_strings.empty()) {
         b += L"last output :\n";
         for (const auto& s : r.debug_strings)
             b += std::format(L"  > {}\n", s);
     }
+    if (r.debug_strings_omitted)
+        b += std::format(L"omitted     : {} mirrored plugin log line(s), e.g. cleo.asi "
+                         L"(--all-output keeps them)\n", r.debug_strings_omitted);
 
     b += std::format(L"log file    : {}\n", ctx.log_path);
     b += L"===== END REPORT =====";

@@ -44,6 +44,9 @@ struct Result {
     bool     samp_loaded = false;      // samp.dll appeared in the module list
     std::vector<ExceptionRec> exceptions;      // non-breakpoint exceptions seen
     std::vector<std::wstring> debug_strings;   // last few OutputDebugString lines
+    std::vector<std::wstring> fault_context;   // ...as they stood at the first hard fault
+    size_t lines_after_fault = 0;              // lines recorded since that snapshot
+    size_t debug_strings_omitted = 0;          // mirrored log lines kept out of the report
     std::vector<ModuleRec>    modules;
 };
 
@@ -69,8 +72,13 @@ Result watch(HANDLE process, uint64_t launch_tick, DWORD timeout_ms, bool wait_f
 // gdb-lite. Call with the target's main thread still SUSPENDED; `resume` is
 // invoked once the debugger is attached so no early event is missed. Blocks
 // until the process exits (whole session).
+//
+// keep_all_output: report every OutputDebugString line, including the ones a
+// third-party log mirror (cleo.asi) floods the debug channel with. They are
+// always written to the trace log either way.
 Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
-                      const std::function<void()>& resume, Logger& log);
+                      const std::function<void()>& resume, Logger& log,
+                      bool keep_all_output = false);
 
 // Builds the paste-ready report block.
 std::wstring format_report(const ReportContext& ctx, const Result& r);

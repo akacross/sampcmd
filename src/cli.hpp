@@ -30,6 +30,7 @@ struct CliOptions {
     bool monitor   = false;   // --monitor/--gdb: attach debugger, capture crashes
     bool watch     = false;   // --watch: stay attached for the whole session
     bool report    = false;   // --report: emit the report block even on clean exit
+    bool all_output = false;  // --all-output: keep plugin log-mirror lines in the report
     unsigned grace_ms = 8000; // --grace <sec>: startup-watchdog window (0 disables)
 
     // open.mp: also inject omp-client.dll after samp.dll.

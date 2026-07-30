@@ -137,7 +137,7 @@ debugging**:
 
 ```
 ===== SAMPCMD REPORT (copy everything between the lines) =====
-sampcmd     : 2.0.0
+sampcmd     : 2.2.0
 os / wine   : 10.0.19045 | Wine 11.12 (Linux 6.x)
 target      : gta_sa.exe [samp.dll injected]
 outcome     : CRASHED after 2140 ms
@@ -145,11 +145,28 @@ exit/status : 0xC0000005  ACCESS_VIOLATION (bad memory access)
 fault       : 0xC0000005 ACCESS_VIOLATION at gta_sa.exe+0x28A1B2
 exceptions  : 2 seen (showing the fatal one)
 modules     : 41 loaded | samp.dll LOADED
-last output :
+output@fault:
   > SA-MP: ...
+  ... then:
+  > SA-MP: ...
+omitted     : 37 mirrored plugin log line(s), e.g. cleo.asi (--all-output keeps them)
 log file    : Z:\...\sampcmd.log
 ===== END REPORT =====
 ```
+
+### A note on the captured output
+
+`OutputDebugString` is a process-wide channel, and attaching the debugger makes
+sampcmd its only listener for the session. Anything loaded into GTA can write to
+it — notably **cleo.asi**, which mirrors every `cleo.log` line into the debug
+channel. Left alone, that flood evicts the game's own output from the report and
+buries the crash under CLEO's shutdown chatter, so those mirrored lines are
+dropped from the report (`--all-output` keeps them; the trace log under
+`--debug` always has every line, and `cleo.log` has them anyway).
+
+When a hard fault is seen, the report shows the output **as it stood at the
+fault** (`output@fault`) plus a few trailing lines, rather than only the last
+lines before exit.
 
 ```sh
 # richest crash info: attach the debugger for the session
@@ -171,6 +188,7 @@ sampcmd --monitor -- -c -n MyNick -h 127.0.0.1 -p 7777
 | `--watch` | Stay attached until GTA exits, then report (no debugger) |
 | `--grace <sec>` | Startup-watchdog window (default 8, `0` disables monitoring) |
 | `--report` | Emit the report block even on a clean exit |
+| `--all-output` | Keep plugin log-mirror lines (`cleo.asi`) in the report instead of dropping them |
 | `--wait-idle` | `WaitForInputIdle` after resuming GTA |
 | `--no-kill-on-fail` | Resume GTA even if injection fails |
 | `--game-dir <path>` | Game directory (default: the launcher's folder) |

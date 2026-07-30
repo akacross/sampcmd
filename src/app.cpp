@@ -20,7 +20,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr wchar_t kVersion[] = L"2.1.0";
+constexpr wchar_t kVersion[] = L"2.2.0";
 
 // Quotes a single argument per the CommandLineToArgvW / MSVCRT rules so that
 // arguments containing spaces or quotes survive the round trip into gta_sa.exe.
@@ -233,7 +233,8 @@ int App::run() {
         // gdb-lite: attach a debugger, then resume from inside the monitor so no
         // early event is missed. Blocks for the whole session.
         mon = monitor::debug_and_wait(proc->process.get(), proc->pid, launch_tick,
-                                      [&] { launcher.resume(*proc); }, logger_);
+                                      [&] { launcher.resume(*proc); }, logger_,
+                                      opts.all_output);
     } else {
         if (!launcher.resume(*proc)) return 6;
 

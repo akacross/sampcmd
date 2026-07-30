@@ -59,6 +59,7 @@ CliOptions parse_args(const std::vector<std::wstring>& argv) {
             else if (n == L"--monitor" || n == L"--gdb") o.monitor = true;
             else if (n == L"--watch")     o.watch = true;
             else if (n == L"--report")    o.report = true;
+            else if (n == L"--all-output") o.all_output = true;
             else if (n == L"--grace") {
                 std::optional<std::wstring> v;
                 if (!take_value(i, s, n, v)) return o;
@@ -118,6 +119,8 @@ std::wstring usage_text() {
         L"  --watch              Stay attached until GTA exits, then report\n"
         L"  --grace <seconds>    Startup-watchdog window (default 8, 0 disables)\n"
         L"  --report             Emit the report block even on a clean exit\n"
+        L"  --all-output         Keep plugin log-mirror lines (cleo.asi) in the report;\n"
+        L"                       they are dropped by default so the game's own output shows\n"
         L"  --wait-idle          WaitForInputIdle after resuming GTA (diagnostic)\n"
         L"  --no-kill-on-fail    Leave GTA running even if injection fails\n"
         L"  --game-dir <path>    Game directory (default: launcher's own folder)\n"
