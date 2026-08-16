@@ -31,6 +31,7 @@ add_executable(sampcmd
   src/error_formatter.cpp
   src/process_launcher.cpp
   src/injector.cpp
+  src/host_resolver.cpp
   src/monitor.cpp
   res/sampcmd.rc
 )
@@ -62,6 +63,7 @@ target_link_libraries(sampcmd PRIVATE
   user32    # MessageBoxW
   advapi32
   psapi     # GetModuleFileNameEx / GetModuleInformation (monitor)
+  ws2_32    # GetAddrInfoW + the SA:MP query probe (host_resolver)
 )
 
 # Ensure windres can find res/sampcmd.manifest (referenced by a relative path).

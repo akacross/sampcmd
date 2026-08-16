@@ -132,5 +132,10 @@ std::wstring usage_text() {
         L"\n"
         L"Forwarded to gta_sa.exe (SA:MP connect flags), e.g.:\n"
         L"  sampcmd -c -n MyNick -h 127.0.0.1 -p 7777\n"
-        L"  sampcmd --debug --console -- -c -n MyNick -h play.example.net -p 7777\n";
+        L"  sampcmd --debug --console -- -c -n MyNick -h play.example.net -p 7777\n"
+        L"\n"
+        L"If -h is a hostname, sampcmd resolves it and forwards an address the\n"
+        L"server actually answers on. SA:MP connects to the first address the\n"
+        L"resolver returns, and DNS pools often keep a record pointing at a machine\n"
+        L"that no longer serves - which fails every attempt, not one in ten.\n";
 }

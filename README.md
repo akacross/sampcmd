@@ -100,6 +100,38 @@ sampcmd -omp -c -n MyNick -h 127.0.0.1 -p 7777
 # custom path: sampcmd -omp --omp-dll "C:\path\to\omp-client.dll" -c -n ... -h ... -p ...
 ```
 
+### Hostnames in `-h` (dead DNS pool members)
+
+If `-h` is a hostname rather than an IP, sampcmd resolves it and forwards **an
+address the server actually answers on**.
+
+This exists because of a failure that looks nothing like DNS. SA:MP connects to
+the *first* address the resolver hands it, and community servers publish
+round-robin A-record pools whose members outlive the machines behind them. Wine
+resolves through `getaddrinfo`, whose RFC 3484 ordering is stable for a given
+client — so if the dead member sorts first you do not get an intermittent
+failure, you get `Failed to connect to host` on every single attempt, on a
+hostname that looks perfectly healthy everywhere else.
+
+Resolving alone does not fix it (the stock `samp.exe` resolves too, and picks
+the same dead address), so sampcmd **proves** the address first: it sends the
+same info query a server browser sends and takes the first candidate that
+answers.
+
+```
+[Host resolve]
+host           : s2.gta-mp.cz (port 7777)
+resolved       : 8 address(es)
+  178.32.234.16  - no reply in 700 ms
+  51.254.21.27   - answered in 117 ms  <- using this
+WARN 1 address(es) ahead of 51.254.21.27 did not answer - the DNS pool has dead members
+```
+
+Cost is one UDP round-trip (~120–250 ms) in the normal case, since the first
+address usually answers. It never makes things worse: an IP literal, a missing
+`-h`, a resolver failure, or a pool where nothing answers all fall back to
+forwarding the hostname exactly as before.
+
 ### Diagnosing the "exits immediately" problem
 
 ```sh

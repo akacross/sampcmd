@@ -2,6 +2,7 @@
 
 #include "diagnostics.hpp"
 #include "error_formatter.hpp"
+#include "host_resolver.hpp"
 #include "injector.hpp"
 #include "monitor.hpp"
 #include "process_launcher.hpp"
@@ -169,6 +170,22 @@ int App::run() {
                        {L"Expected dll", paths.dll.wstring()},
                    });
         return 3;
+    }
+
+    // Turn "-h <hostname>" into an address the server actually answers on.
+    //
+    // SA:MP connects to the FIRST address the resolver returns, and community
+    // DNS pools routinely keep an A record pointing at a machine that no longer
+    // serves. Under Wine, getaddrinfo's RFC 3484 ordering is stable, so a dead
+    // member that sorts first fails every attempt rather than one in ten. See
+    // host_resolver.hpp. Leaves everything alone for IP literals, an absent -h,
+    // or a probe that proves nothing, so it can never be worse than forwarding
+    // the hostname raw.
+    {
+        hostres::Result hr = hostres::resolve_host_arg(opts.forwarded, logger_);
+        hostres::apply(opts.forwarded, hr);
+        if (hr.attempted && !hr.chosen.empty() && hr.chosen != hr.original)
+            logger_.infof(L"host           : {} -> {}", hr.original, hr.chosen);
     }
 
     const std::wstring child_cmd = build_child_command_line(paths.exe, opts.forwarded);
