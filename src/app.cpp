@@ -21,7 +21,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr wchar_t kVersion[] = L"2.2.0";
+constexpr wchar_t kVersion[] = L"2.3.0";
 
 // Quotes a single argument per the CommandLineToArgvW / MSVCRT rules so that
 // arguments containing spaces or quotes survive the round trip into gta_sa.exe.
@@ -85,6 +85,12 @@ App::Paths App::resolve_paths(const CliOptions& opts) const {
     if (log_name.empty()) log_name = L"sampcmd";
     log_name += L".log";
     p.log = opts.log_path ? fs::path(*opts.log_path) : (launcher_dir / log_name);
+
+    // Proven -h addresses live beside the log and follow --log, so a launcher
+    // driven with a custom log path keeps its cache with it (sampcmd.hosts).
+    if (opts.no_host_cache)          p.host_cache.clear();
+    else if (opts.host_cache_path)   p.host_cache = fs::path(*opts.host_cache_path);
+    else                             p.host_cache = fs::path(p.log).replace_extension(L".hosts");
     return p;
 }
 
@@ -182,10 +188,19 @@ int App::run() {
     // or a probe that proves nothing, so it can never be worse than forwarding
     // the hostname raw.
     {
-        hostres::Result hr = hostres::resolve_host_arg(opts.forwarded, logger_);
+        hostres::Options ho;
+        ho.cache_path = paths.host_cache.wstring();
+        hostres::Result hr = hostres::resolve_host_arg(opts.forwarded, logger_, ho);
         hostres::apply(opts.forwarded, hr);
-        if (hr.attempted && !hr.chosen.empty() && hr.chosen != hr.original)
-            logger_.infof(L"host           : {} -> {}", hr.original, hr.chosen);
+        if (hr.attempted && !hr.chosen.empty() && hr.chosen != hr.original) {
+            const wchar_t* how =
+                hr.source == hostres::Source::Probe    ? L"probed"    :
+                hr.source == hostres::Source::Pinned   ? L"pinned"    :
+                hr.source == hostres::Source::Fresh    ? L"cached"    :
+                hr.source == hostres::Source::Fallback ? L"cached (unproven this launch)" :
+                                                         L"resolved";
+            logger_.infof(L"host           : {} -> {} [{}]", hr.original, hr.chosen, how);
+        }
     }
 
     const std::wstring child_cmd = build_child_command_line(paths.exe, opts.forwarded);

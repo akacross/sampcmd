@@ -60,6 +60,7 @@ CliOptions parse_args(const std::vector<std::wstring>& argv) {
             else if (n == L"--watch")     o.watch = true;
             else if (n == L"--report")    o.report = true;
             else if (n == L"--all-output") o.all_output = true;
+            else if (n == L"--no-host-cache") o.no_host_cache = true;
             else if (n == L"--grace") {
                 std::optional<std::wstring> v;
                 if (!take_value(i, s, n, v)) return o;
@@ -73,6 +74,7 @@ CliOptions parse_args(const std::vector<std::wstring>& argv) {
             else if (n == L"--dll")       { if (!take_value(i, s, n, o.dll_name)) return o; }
             else if (n == L"--omp-dll")   { if (!take_value(i, s, n, o.omp_dll)) return o; }
             else if (n == L"--log")       { if (!take_value(i, s, n, o.log_path)) return o; }
+            else if (n == L"--host-cache"){ if (!take_value(i, s, n, o.host_cache_path)) return o; }
             else {
                 o.parse_error = std::format(L"unknown option: {}", n);
                 return o;
@@ -127,6 +129,8 @@ std::wstring usage_text() {
         L"  --exe <name|path>    Target executable (default: gta_sa.exe)\n"
         L"  --dll <name|path>    DLL to inject   (default: samp.dll)\n"
         L"  --log <path>         Log file path   (default: launcher.log)\n"
+        L"  --host-cache <path>  Proven -h addresses (default: launcher.hosts, next to the log)\n"
+        L"  --no-host-cache      Do not read or write remembered -h addresses\n"
         L"  --help               Show this help\n"
         L"  --version            Show version\n"
         L"\n"
@@ -137,5 +141,10 @@ std::wstring usage_text() {
         L"If -h is a hostname, sampcmd resolves it and forwards an address the\n"
         L"server actually answers on. SA:MP connects to the first address the\n"
         L"resolver returns, and DNS pools often keep a record pointing at a machine\n"
-        L"that no longer serves - which fails every attempt, not one in ten.\n";
+        L"that no longer serves - which fails every attempt, not one in ten.\n"
+        L"\n"
+        L"The address a host answered on is remembered in launcher.hosts: it is tried\n"
+        L"first next launch, reused outright for five minutes, and used as a fallback\n"
+        L"when a query goes unanswered (real servers drop 10-15% of them). Add a line\n"
+        L"\"host <tab> port <tab> address <tab> pin\" to that file to hard-wire a host.\n";
 }

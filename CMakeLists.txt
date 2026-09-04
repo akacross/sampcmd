@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(sampcmd LANGUAGES CXX RC VERSION 2.2.0)
+project(sampcmd LANGUAGES CXX RC VERSION 2.3.0)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -32,6 +32,7 @@ add_executable(sampcmd
   src/process_launcher.cpp
   src/injector.cpp
   src/host_resolver.cpp
+  src/host_cache.cpp
   src/monitor.cpp
   res/sampcmd.rc
 )

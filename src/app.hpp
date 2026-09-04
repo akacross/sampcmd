@@ -20,6 +20,7 @@ private:
         std::filesystem::path dll;
         std::filesystem::path omp;   // omp-client.dll (only used with -omp)
         std::filesystem::path log;
+        std::filesystem::path host_cache;  // proven -h addresses (sampcmd.hosts)
     };
     Paths resolve_paths(const CliOptions& opts) const;
 

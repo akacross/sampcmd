@@ -36,6 +36,11 @@ struct CliOptions {
     // open.mp: also inject omp-client.dll after samp.dll.
     bool omp = false;                      // -omp / --omp
 
+    // Host resolution: remembering the address a hostname answered on (see
+    // host_cache.hpp). On by default; the file sits next to the log.
+    bool no_host_cache = false;            // --no-host-cache: never read or write it
+    std::optional<std::wstring> host_cache_path;  // --host-cache <path>
+
     // Path overrides (all optional; defaults derive from the launcher directory).
     std::optional<std::wstring> game_dir;  // --game-dir <path>
     std::optional<std::wstring> exe_name;  // --exe <name-or-path>  (default gta_sa.exe)

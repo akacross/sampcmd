@@ -75,22 +75,51 @@ void record_module(std::vector<ModuleRec>& mods, HANDLE process, uintptr_t base)
     mods.push_back(std::move(m));
 }
 
-// Maps a faulting address to the containing module.
-void locate(const std::vector<ModuleRec>& mods, ExceptionRec& ex) {
+// Finds the module an address falls in, or nullptr.
+const ModuleRec* find_module(const std::vector<ModuleRec>& mods, uintptr_t addr) {
     const ModuleRec* best = nullptr;
     for (const auto& m : mods) {
         if (m.size) {
-            if (ex.address >= m.base && ex.address < m.base + m.size) { best = &m; break; }
-        } else if (ex.address >= m.base && (!best || m.base > best->base)) {
+            if (addr >= m.base && addr < m.base + m.size) return &m;
+        } else if (addr >= m.base && (!best || m.base > best->base)) {
             best = &m;  // no size known: nearest base below the address
         }
     }
-    if (best) {
+    return best;
+}
+
+// Maps a faulting address to the containing module.
+void locate(const std::vector<ModuleRec>& mods, ExceptionRec& ex) {
+    if (const ModuleRec* best = find_module(mods, ex.address)) {
         ex.module = best->name;
         ex.module_offset = ex.address - best->base;
     } else {
         ex.module = L"?";
         ex.module_offset = ex.address;
+    }
+}
+
+// Pulls the inaccessible pointer out of an access violation's record. The fault
+// address says which instruction died; this says what it touched, which is
+// usually the difference between a diagnosis and a guess.
+void record_access(const std::vector<ModuleRec>& mods,
+                   const EXCEPTION_RECORD& er, ExceptionRec& ex) {
+    if (er.ExceptionCode != EXCEPTION_ACCESS_VIOLATION &&
+        er.ExceptionCode != EXCEPTION_IN_PAGE_ERROR)
+        return;
+    if (er.NumberParameters < 2) return;
+
+    ex.access_known = true;
+    ex.access_kind = er.ExceptionInformation[0];
+    ex.access_address = static_cast<uintptr_t>(er.ExceptionInformation[1]);
+
+    // Only claim a module when the address is genuinely inside one. The
+    // "nearest base below" fallback is fine for a code address, but on a wild
+    // data pointer it would invent an attribution.
+    const ModuleRec* m = find_module(mods, ex.access_address);
+    if (m && m->size && ex.access_address < m->base + m->size) {
+        ex.access_module = m->name;
+        ex.access_offset = ex.access_address - m->base;
     }
 }
 
@@ -123,6 +152,21 @@ bool is_crash_status(DWORD code) {
     // Plain application exit codes (0, small ints) are not crashes.
     return (code & 0xC0000000u) == 0xC0000000u ||
            code == 0x40000015u /* FATAL_APP_EXIT */;
+}
+
+std::wstring describe_access(const ExceptionRec& ex) {
+    if (!ex.access_known) return {};
+
+    const wchar_t* verb = ex.access_kind == 1 ? L"writing"
+                        : ex.access_kind == 8 ? L"executing (DEP)"
+                                              : L"reading";
+    std::wstring where;
+    if (!ex.access_module.empty())
+        where = std::format(L" ({}+0x{:X})", ex.access_module, ex.access_offset);
+    else if (ex.access_address < 0x10000)
+        where = L" (low address - a null, or a count/index used as a pointer)";
+
+    return std::format(L"{} 0x{:08X}{}", verb, ex.access_address, where);
 }
 
 std::wstring decode_status(DWORD code) {
@@ -292,6 +336,10 @@ Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
                 ExceptionRec x;
                 x.code = ec; x.address = addr; x.first_chance = first;
                 locate(r.modules, x);
+                record_access(r.modules, er, x);
+                const std::wstring access = describe_access(x);
+                const std::wstring access_suffix =
+                    access.empty() ? std::wstring{} : L" - " + access;
 
                 // Freeze what the game had said up to this point, before the
                 // shutdown chatter that follows a crash pushes it out.
@@ -303,8 +351,9 @@ Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
                 // Fatal when the app didn't handle it: it arrived as last-chance,
                 // or the same first-chance fault looped back to us unresolved.
                 if (!first || fault_repeats >= 2) {
-                    log.errorf(L"unhandled {:#010x} ({}) at {}+{:#x} - terminating target",
-                               ec, decode_status(ec), x.module, x.module_offset);
+                    log.errorf(L"unhandled {:#010x} ({}) at {}+{:#x}{} - terminating target",
+                               ec, decode_status(ec), x.module, x.module_offset,
+                               access_suffix);
                     // Re-anchor the output snapshot on the fault that actually
                     // killed the game, not on some earlier one the app handled.
                     r.fault_context = r.debug_strings;
@@ -322,8 +371,9 @@ Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
 
                 // First sighting: record it, then give the app's own handler
                 // (e.g. crashes.asi) a chance before we decide it's fatal.
-                log.debugf(L"first-chance {:#010x} ({}) at {}+{:#x}",
-                           ec, decode_status(ec), x.module, x.module_offset);
+                log.debugf(L"first-chance {:#010x} ({}) at {}+{:#x}{}",
+                           ec, decode_status(ec), x.module, x.module_offset,
+                           access_suffix);
                 r.exceptions.push_back(std::move(x));
                 if (r.exceptions.size() > kMaxExceptions)
                     r.exceptions.erase(r.exceptions.begin());
@@ -379,6 +429,8 @@ std::wstring format_report(const ReportContext& ctx, const Result& r) {
         b += std::format(L"fault       : 0x{:08X} {} at {}+0x{:X}\n",
                          pick->code, decode_status(pick->code), pick->module,
                          pick->module_offset);
+        if (const std::wstring access = describe_access(*pick); !access.empty())
+            b += std::format(L"accessing   : {}\n", access);
         if (r.exceptions.size() > 1)
             b += std::format(L"exceptions  : {} seen (showing the fatal one)\n",
                              r.exceptions.size());

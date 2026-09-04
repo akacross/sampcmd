@@ -34,7 +34,21 @@ struct ExceptionRec {
     bool         first_chance = true;
     std::wstring module;         // module the faulting address falls in ("?" if none)
     uintptr_t    module_offset = 0;
+
+    // Access violations also name the pointer that could not be accessed. That
+    // is what separates a null pointer from a corrupted one from a freed block,
+    // and it costs nothing: the debugger hands it to us in the same record.
+    bool         access_known = false;
+    ULONG_PTR    access_kind = 0;      // 0 read, 1 write, 8 DEP violation
+    uintptr_t    access_address = 0;
+    std::wstring access_module;        // module that address lands in, empty if none
+    uintptr_t    access_offset = 0;
 };
+
+// One-line description of what an access violation touched, e.g.
+// "writing 0x00000000 (null)" or "reading 0x02C70334 (samp.dll+0x150334)".
+// Empty for exceptions that carry no access information.
+std::wstring describe_access(const ExceptionRec& ex);
 
 struct Result {
     bool     process_exited = false;   // did we observe the process end?

@@ -122,7 +122,7 @@ answers.
 [Host resolve]
 host           : s2.gta-mp.cz (port 7777)
 resolved       : 8 address(es)
-  178.32.234.16  - no reply in 700 ms
+  178.32.234.16  - no reply in 700 ms (attempt 1 of 3)
   51.254.21.27   - answered in 117 ms  <- using this
 WARN 1 address(es) ahead of 51.254.21.27 did not answer - the DNS pool has dead members
 ```
@@ -131,6 +131,54 @@ Cost is one UDP round-trip (~120–250 ms) in the normal case, since the first
 address usually answers. It never makes things worse: an IP literal, a missing
 `-h`, a resolver failure, or a pool where nothing answers all fall back to
 forwarding the hostname exactly as before.
+
+#### One query is not proof — retries and `sampcmd.hosts`
+
+A SA:MP query is a single UDP datagram with no retransmission, and real servers
+drop them. Measured 2026-08-16, 20 queries per run, paced and unpaced:
+
+| server | address | answered | RTT |
+| --- | --- | --- | --- |
+| `samp.hzgaming.net` | 213.32.6.232 | 17/20, 18/20 | ~118 ms |
+| `s2.gta-mp.cz` | 51.254.21.27 | 20/20 | ~118 ms |
+
+So hzgaming — a live server with a *single* A record, answering in a sixth of the
+probe timeout — looked dead about one launch in seven, and the launcher then
+logged `no address answered a SA:MP query` and forwarded the hostname. Nothing
+was wrong with the timeout; the packet simply never came back.
+
+Two things follow. The probe now walks the pool **three times** instead of once,
+which takes a false "dead" from ~1/7 to ~1/350 for that server and costs nothing
+when an address answers. And every proven address is written to
+**`sampcmd.hosts`**, next to the log:
+
+```
+# host <tab> port <tab> address <tab> proven-at <tab> rtt_ms <tab> fails <tab> pool
+samp.hzgaming.net	7777	213.32.6.232	1786915058	118	0	213.32.6.232
+```
+
+That file is used four ways:
+
+- **Tried first.** The address that answered last time goes to the head of the
+  probe queue, so a bad DNS order costs nothing after the first launch.
+- **Trusted for 5 minutes.** Relaunching the server you were just on (usually
+  after a crash) skips DNS and the probe entirely — `cache hit : 213.32.6.232 -
+  answered 15 s ago in 118 ms; skipping DNS and probe`.
+- **Fallback for a day.** If nothing answers this launch but this host answered
+  within the last 24 hours *and* DNS still lists that address, it is used anyway
+  — silence is far more likely to be a dropped datagram than a dead server. After
+  3 such launches with no fresh proof, the entry is forgotten.
+- **Survives a DNS outage.** If the name stops resolving, the addresses from the
+  last successful lookup are probed instead of giving up.
+
+Add a line by hand to pin a host permanently — no DNS, no probe, no expiry:
+
+```
+myserver.net	7777	203.0.113.10	pin
+```
+
+`--host-cache <path>` moves the file; `--no-host-cache` disables reading and
+writing it.
 
 ### Diagnosing the "exits immediately" problem
 
@@ -169,7 +217,7 @@ debugging**:
 
 ```
 ===== SAMPCMD REPORT (copy everything between the lines) =====
-sampcmd     : 2.2.0
+sampcmd     : 2.3.0
 os / wine   : 10.0.19045 | Wine 11.12 (Linux 6.x)
 target      : gta_sa.exe [samp.dll injected]
 outcome     : CRASHED after 2140 ms
@@ -227,6 +275,8 @@ sampcmd --monitor -- -c -n MyNick -h 127.0.0.1 -p 7777
 | `--exe <name\|path>` | Target executable (default `gta_sa.exe`) |
 | `--dll <name\|path>` | DLL to inject (default `samp.dll`) |
 | `--log <path>` | Log file (default `<launcher-name>.log`, e.g. `sampcmd.log`) |
+| `--host-cache <path>` | Proven `-h` addresses (default `<launcher-name>.hosts`, next to the log) |
+| `--no-host-cache` | Do not read or write remembered `-h` addresses |
 | `--help`, `--version` | Info |
 
 The application icon is generated from the game's `samp.png` at build time
