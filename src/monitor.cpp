@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <format>
 #include <string_view>
+#include <unordered_map>
 
 namespace monitor {
 
@@ -16,6 +17,7 @@ namespace {
 constexpr size_t kMaxDebugStrings = 8;
 constexpr size_t kMaxExceptions   = 6;
 constexpr size_t kMaxTailAfterFault = 4;  // trailing lines shown alongside fault context
+constexpr size_t kMaxBreaks = 4;          // debug breaks kept for the report
 
 // True for a line that looks like a plugin mirroring its own log file into the
 // debug channel: CLEO (cleo.asi) passes every cleo.log line to
@@ -64,6 +66,73 @@ uintptr_t module_size(HANDLE process, uintptr_t base) {
     if (::GetModuleInformation(process, reinterpret_cast<HMODULE>(base), &mi, sizeof(mi)))
         return mi.SizeOfImage;
     return 0;
+}
+
+// Printable ASCII starting at `addr` in the target, if there are at least
+// four characters of it; empty otherwise.
+std::wstring remote_text(HANDLE process, uintptr_t addr) {
+    if (addr < 0x10000) return {};
+    char buf[96];
+    SIZE_T got = 0;
+    if (!::ReadProcessMemory(process, reinterpret_cast<LPCVOID>(addr), buf, sizeof(buf), &got)) {
+        // the string may end near a page edge: try a shorter read
+        if (!::ReadProcessMemory(process, reinterpret_cast<LPCVOID>(addr), buf, 16, &got)) return {};
+    }
+    std::wstring out;
+    for (SIZE_T i = 0; i < got; ++i) {
+        const unsigned char c = static_cast<unsigned char>(buf[i]);
+        if (c == 0) break;
+        if (c < 0x20 || c > 0x7E) return {};
+        out += static_cast<wchar_t>(c);
+    }
+    return out.size() >= 4 ? out : std::wstring{};
+}
+
+// The runs of readable text (six characters or more) in the top of a stack:
+// what a function formatted into a local buffer before it stopped.
+std::wstring stack_text(HANDLE process, uintptr_t esp) {
+    char buf[0x400];
+    SIZE_T got = 0;
+    if (!::ReadProcessMemory(process, reinterpret_cast<LPCVOID>(esp), buf, sizeof(buf), &got))
+        return {};
+    std::wstring out, run;
+    auto flush = [&] {
+        while (!run.empty() && run.back() == L' ') run.pop_back();
+        // text, not stack words that happen to be printable: four letters or more
+        const auto letters = std::count_if(run.begin(), run.end(), [](wchar_t c) {
+            return (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z'); });
+        if (run.size() >= 6 && letters >= 4) {
+            if (!out.empty()) out += L" | ";
+            out += L"'" + run + L"'";
+        }
+        run.clear();
+    };
+    for (SIZE_T i = 0; i < got && out.size() < 400; ++i) {
+        const unsigned char c = static_cast<unsigned char>(buf[i]);
+        if (c >= 0x20 && c <= 0x7E) run += static_cast<wchar_t>(c);
+        else flush();
+    }
+    flush();
+    return out;
+}
+
+// One line for a debug break: where, the registers that point at text, and
+// the text on the stack.
+std::wstring describe_break(HANDLE process, HANDLE thread, const ExceptionRec& x) {
+    std::wstring line = std::format(L"int3 at {}+0x{:X}", x.module, x.module_offset);
+    if (!thread) return line;
+    CONTEXT ctx{};
+    ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+    if (!::GetThreadContext(thread, &ctx)) return line;
+    const std::pair<const wchar_t*, DWORD> regs[] = {
+        {L"eax", ctx.Eax}, {L"ebx", ctx.Ebx}, {L"ecx", ctx.Ecx}, {L"edx", ctx.Edx},
+        {L"esi", ctx.Esi}, {L"edi", ctx.Edi}};
+    for (const auto& [name, value] : regs)
+        if (std::wstring t = remote_text(process, value); !t.empty())
+            line += std::format(L" {}->'{}'", name, t);
+    if (std::wstring t = stack_text(process, ctx.Esp); !t.empty())
+        line += L" stack: " + t;
+    return line;
 }
 
 void record_module(std::vector<ModuleRec>& mods, HANDLE process, uintptr_t base) {
@@ -256,6 +325,9 @@ Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
     // The debug output around the first hard fault is what actually explains a
     // crash; the ring buffer alone would have rotated it away by exit time.
     bool      fault_context_taken = false;
+    // Thread handles by id, from the create events (the debugger owns them),
+    // so a debug break can read its thread's registers.
+    std::unordered_map<DWORD, HANDLE> threads;
 
     for (;;) {
         DEBUG_EVENT ev{};
@@ -269,7 +341,16 @@ Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
         DWORD cont = DBG_CONTINUE;
 
         switch (ev.dwDebugEventCode) {
+            case CREATE_THREAD_DEBUG_EVENT: {
+                threads[ev.dwThreadId] = ev.u.CreateThread.hThread;
+                break;
+            }
+            case EXIT_THREAD_DEBUG_EVENT: {
+                threads.erase(ev.dwThreadId);
+                break;
+            }
             case CREATE_PROCESS_DEBUG_EVENT: {
+                threads[ev.dwThreadId] = ev.u.CreateProcessInfo.hThread;
                 record_module(r.modules, process,
                               reinterpret_cast<uintptr_t>(ev.u.CreateProcessInfo.lpBaseOfImage));
                 if (ev.u.CreateProcessInfo.hFile) ::CloseHandle(ev.u.CreateProcessInfo.hFile);
@@ -317,6 +398,23 @@ Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
                 // crashes - swallow them.
                 if (ec == EXCEPTION_BREAKPOINT || ec == 0x4000001F /*WX86 BP*/ ||
                     ec == EXCEPTION_SINGLE_STEP) {
+                    // ...but one in the game's own code is worth a line: the
+                    // attach break is ntdll's (DbgUiRemoteBreakin).
+                    if (ec != EXCEPTION_SINGLE_STEP) {
+                        ExceptionRec x;
+                        x.code = ec;
+                        x.address = reinterpret_cast<uintptr_t>(er.ExceptionAddress);
+                        locate(r.modules, x);
+                        std::wstring lower = x.module;
+                        std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
+                        if (lower != L"ntdll.dll" && lower != L"kernelbase.dll" && lower != L"kernel32.dll") {
+                            auto t = threads.find(ev.dwThreadId);
+                            std::wstring line = describe_break(process, t == threads.end() ? nullptr : t->second, x);
+                            log.warnf(L"debug break: {}", line);
+                            r.breaks.push_back(std::move(line));
+                            if (r.breaks.size() > kMaxBreaks) r.breaks.erase(r.breaks.begin());
+                        }
+                    }
                     cont = DBG_CONTINUE;
                     break;
                 }
@@ -435,6 +533,9 @@ std::wstring format_report(const ReportContext& ctx, const Result& r) {
             b += std::format(L"exceptions  : {} seen (showing the fatal one)\n",
                              r.exceptions.size());
     }
+
+    for (const auto& line : r.breaks)
+        b += std::format(L"debug break : {}\n", line);
 
     if (r.attached)
         b += std::format(L"modules     : {} loaded | samp.dll {}\n",

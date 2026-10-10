@@ -61,6 +61,12 @@ struct Result {
     std::vector<std::wstring> fault_context;   // ...as they stood at the first hard fault
     size_t lines_after_fault = 0;              // lines recorded since that snapshot
     size_t debug_strings_omitted = 0;          // mirrored log lines kept out of the report
+    // Debug breaks outside ntdll (DebugBreak, __debugbreak, int3): code that
+    // stops to say why just before it aborts. Lanes does this: FormatMessage,
+    // fprintf to a stderr the game does not have, int3, abort() - and the
+    // abort alone is an anonymous __fastfail. Each line names the module and
+    // the text the registers and the stack held at the break.
+    std::vector<std::wstring> breaks;
     std::vector<ModuleRec>    modules;
 };
 
