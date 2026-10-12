@@ -136,13 +136,46 @@ std::wstring describe_break(HANDLE process, HANDLE thread, const ExceptionRec& x
     return line;
 }
 
+// A load at a base that is already recorded replaces that record: Wine loads,
+// unloads and reloads some DLLs at one base (bcrypt, rsaenh, crypt32), and a
+// stale record there - read for a size after something else took the range -
+// claimed whole neighbourhoods of addresses for the wrong module.
 void record_module(std::vector<ModuleRec>& mods, HANDLE process, uintptr_t base) {
     if (!base) return;
     ModuleRec m;
     m.base = base;
     m.size = module_size(process, base);
     m.name = module_name(process, base);
+    for (auto& old : mods)
+        if (old.base == base) { old = std::move(m); return; }
     mods.push_back(std::move(m));
+}
+
+void forget_module(std::vector<ModuleRec>& mods, uintptr_t base) {
+    std::erase_if(mods, [base](const ModuleRec& m) { return m.base == base; });
+}
+
+// The loader's own list, read at the fault: by then every module is in it with
+// its real size, which the load events often could not get (GetModuleInformation
+// has nothing yet at LOAD_DLL time under Wine). Kept as it was if this fails.
+void refresh_modules(std::vector<ModuleRec>& mods, HANDLE process) {
+    HMODULE handles[1024];
+    DWORD needed = 0;
+    if (!::EnumProcessModulesEx(process, handles, sizeof(handles), &needed, LIST_MODULES_ALL))
+        return;
+    const size_t count = std::min<size_t>(needed / sizeof(HMODULE), std::size(handles));
+    if (count == 0) return;
+    std::vector<ModuleRec> fresh;
+    fresh.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        const auto base = reinterpret_cast<uintptr_t>(handles[i]);
+        ModuleRec m;
+        m.base = base;
+        m.size = module_size(process, base);
+        m.name = module_name(process, base);
+        fresh.push_back(std::move(m));
+    }
+    mods = std::move(fresh);
 }
 
 // Finds the module an address falls in, or nullptr.
@@ -361,7 +394,9 @@ Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
             case LOAD_DLL_DEBUG_EVENT: {
                 auto base = reinterpret_cast<uintptr_t>(ev.u.LoadDll.lpBaseOfDll);
                 record_module(r.modules, process, base);
-                const auto& m = r.modules.back();
+                // the record for this base: appended, or one replaced in place
+                const auto& m = *std::find_if(r.modules.begin(), r.modules.end(),
+                                              [base](const ModuleRec& x) { return x.base == base; });
                 if (m.name.size() >= 8) {
                     std::wstring lower = m.name;
                     std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
@@ -369,6 +404,10 @@ Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
                 }
                 log.tracef(L"module loaded : {} @ {:#010x}", m.name, base);
                 if (ev.u.LoadDll.hFile) ::CloseHandle(ev.u.LoadDll.hFile);
+                break;
+            }
+            case UNLOAD_DLL_DEBUG_EVENT: {
+                forget_module(r.modules, reinterpret_cast<uintptr_t>(ev.u.UnloadDll.lpBaseOfDll));
                 break;
             }
             case OUTPUT_DEBUG_STRING_EVENT: {
@@ -432,6 +471,9 @@ Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
                 if (first && ec == last_fault_code && addr == last_fault_addr)
                     ++fault_repeats;
                 else { fault_repeats = 1; last_fault_code = ec; last_fault_addr = addr; }
+
+                // Name things by the loader's list as it is NOW (see refresh_modules).
+                if (first && fault_repeats == 1) refresh_modules(r.modules, process);
 
                 ExceptionRec x;
                 x.code = ec; x.address = addr; x.first_chance = first;

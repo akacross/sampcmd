@@ -217,7 +217,7 @@ debugging**:
 
 ```
 ===== SAMPCMD REPORT (copy everything between the lines) =====
-sampcmd     : 2.4.0
+sampcmd     : 2.4.1
 os / wine   : 10.0.19045 | Wine 11.12 (Linux 6.x)
 target      : gta_sa.exe [samp.dll injected]
 outcome     : CRASHED after 2140 ms
@@ -234,7 +234,7 @@ log file    : Z:\...\sampcmd.log
 ===== END REPORT =====
 ```
 
-### Crashes: SA-MP's dialog, its text, and a dump (2.4.0)
+### Crashes: SA-MP's dialog, its text, and a dump (2.4)
 
 A debugger being attached is exactly what makes Windows and Wine skip a
 program's own unhandled-exception filter, so under `--monitor` SA-MP's crash
@@ -249,7 +249,10 @@ Now, at the **first hard fault** (an access violation, an illegal instruction -
    `EFLAGS`, the 0x280 bytes of stack, and for 0.3.7-R5 `SCM Op / lDbg /
    LastRendObj` and `Game Version`), into the log and the report;
 2. lists the **code addresses on that stack** as `module+offset` - the likely
-   callers, which the dialog never named;
+   callers, which the dialog never named. Modules are named from the loader's
+   own list read at the fault (2.4.1): Wine loads, unloads and reloads some
+   DLLs at one base, and a record kept from the load events alone named
+   whole ranges after a DLL that had left;
 3. writes a **minidump** next to the log, `sampcmd-crash-<date>-<time>.dmp`
    (the faulting thread's registers and stack, the module list, the code
    around the fault; the newest five are kept). `--full-dump` writes the
