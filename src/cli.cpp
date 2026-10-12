@@ -60,6 +60,10 @@ CliOptions parse_args(const std::vector<std::wstring>& argv) {
             else if (n == L"--watch")     o.watch = true;
             else if (n == L"--report")    o.report = true;
             else if (n == L"--all-output") o.all_output = true;
+            else if (n == L"--no-crash-dialog") o.crash_dialog = false;
+            else if (n == L"--crash-dialog") o.crash_dialog = true;
+            else if (n == L"--full-dump") o.dump = monitor::DumpKind::full;
+            else if (n == L"--no-dump")   o.dump = monitor::DumpKind::none;
             else if (n == L"--no-host-cache") o.no_host_cache = true;
             else if (n == L"--grace") {
                 std::optional<std::wstring> v;
@@ -123,6 +127,12 @@ std::wstring usage_text() {
         L"  --report             Emit the report block even on a clean exit\n"
         L"  --all-output         Keep plugin log-mirror lines (cleo.asi) in the report;\n"
         L"                       they are dropped by default so the game's own output shows\n"
+        L"  --no-crash-dialog    With --monitor: stay attached when the game crashes. By\n"
+        L"                       default sampcmd records the crash, then lets go so SA-MP's\n"
+        L"                       own crash dialog shows (a debugger attached hides it)\n"
+        L"  --full-dump          With --monitor: write a full-memory crash dump (hundreds\n"
+        L"                       of MB) instead of the default few-MB minidump\n"
+        L"  --no-dump            With --monitor: write no crash dump\n"
         L"  --wait-idle          WaitForInputIdle after resuming GTA (diagnostic)\n"
         L"  --no-kill-on-fail    Leave GTA running even if injection fails\n"
         L"  --game-dir <path>    Game directory (default: launcher's own folder)\n"

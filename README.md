@@ -217,7 +217,7 @@ debugging**:
 
 ```
 ===== SAMPCMD REPORT (copy everything between the lines) =====
-sampcmd     : 2.3.0
+sampcmd     : 2.4.0
 os / wine   : 10.0.19045 | Wine 11.12 (Linux 6.x)
 target      : gta_sa.exe [samp.dll injected]
 outcome     : CRASHED after 2140 ms
@@ -233,6 +233,55 @@ omitted     : 37 mirrored plugin log line(s), e.g. cleo.asi (--all-output keeps 
 log file    : Z:\...\sampcmd.log
 ===== END REPORT =====
 ```
+
+### Crashes: SA-MP's dialog, its text, and a dump (2.4.0)
+
+A debugger being attached is exactly what makes Windows and Wine skip a
+program's own unhandled-exception filter, so under `--monitor` SA-MP's crash
+dialog used to never appear: the fault came to sampcmd instead, and sampcmd
+ended the game.
+
+Now, at the **first hard fault** (an access violation, an illegal instruction -
+`0xC0000xxx`), while the faulting thread is still stopped on it, sampcmd:
+
+1. reads its registers and stack and writes **what SA-MP's crash dialog shows**,
+   in samp.dll's own format (`Exception At Address`, `Base`, the registers,
+   `EFLAGS`, the 0x280 bytes of stack, and for 0.3.7-R5 `SCM Op / lDbg /
+   LastRendObj` and `Game Version`), into the log and the report;
+2. lists the **code addresses on that stack** as `module+offset` - the likely
+   callers, which the dialog never named;
+3. writes a **minidump** next to the log, `sampcmd-crash-<date>-<time>.dmp`
+   (the faulting thread's registers and stack, the module list, the code
+   around the fault; the newest five are kept). `--full-dump` writes the
+   game's whole memory instead (hundreds of MB to a few GB; the newest two are
+   kept) - what a heap corrupted earlier needs. `--no-dump` writes none.
+4. **lets go of the game** (`DebugActiveProcessStop` with the exception still
+   pending), so the fault is dispatched as if no debugger had been there: the
+   game's own handlers, then SA-MP's crash dialog. sampcmd waits for the game
+   to end and reports its exit status. A fault the game handles just carries
+   on, unwatched for the rest of the session.
+
+`--no-crash-dialog` keeps the 2.3 behaviour: stay attached, and end the game
+once the fault proves unhandled (steps 1-3 still happen).
+
+The report then carries, after the fault line:
+
+```
+handed over : sampcmd let go at the fault so the game's own crash handler (SA-MP's dialog) could run
+dump        : S:\Games\samp-0.3.7\sampcmd-crash-20261012-023521.dmp (2.4 MB)
+code on the stack (nearest the fault first):
+  +000C  d3d9.dll+0x1A5F80
+  ...
+SA-MP crash info:
+  SA-MP 0.3.7-R5
+  Exception At Address: 0x623E63E9
+  Base: 0x02B20000
+  Registers:
+  EAX: 0x...	EBX: 0x...	ECX: 0x...	EDX: 0x...
+  ...
+```
+
+The message box leaves out the 40-line stack dump; the log has all of it.
 
 ### A note on the captured output
 
@@ -269,6 +318,9 @@ sampcmd --monitor -- -c -n MyNick -h 127.0.0.1 -p 7777
 | `--grace <sec>` | Startup-watchdog window (default 8, `0` disables monitoring) |
 | `--report` | Emit the report block even on a clean exit |
 | `--all-output` | Keep plugin log-mirror lines (`cleo.asi`) in the report instead of dropping them |
+| `--no-crash-dialog` | With `--monitor`: stay attached at a crash (SA-MP's dialog then never shows); default is to record the crash and let go so it does |
+| `--full-dump` | With `--monitor`: a full-memory crash dump instead of the default minidump |
+| `--no-dump` | With `--monitor`: no crash dump |
 | `--wait-idle` | `WaitForInputIdle` after resuming GTA |
 | `--no-kill-on-fail` | Resume GTA even if injection fails |
 | `--game-dir <path>` | Game directory (default: the launcher's folder) |

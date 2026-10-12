@@ -9,6 +9,8 @@
 //   * "--" forces all following tokens to be forwarded, even "--"-looking ones.
 #pragma once
 
+#include "monitor.hpp"
+
 #include <optional>
 #include <string>
 #include <vector>
@@ -31,6 +33,8 @@ struct CliOptions {
     bool watch     = false;   // --watch: stay attached for the whole session
     bool report    = false;   // --report: emit the report block even on clean exit
     bool all_output = false;  // --all-output: keep plugin log-mirror lines in the report
+    bool crash_dialog = true; // --no-crash-dialog: stay attached at a crash (SA-MP's dialog never shows)
+    monitor::DumpKind dump = monitor::DumpKind::mini;  // --full-dump / --no-dump
     unsigned grace_ms = 8000; // --grace <sec>: startup-watchdog window (0 disables)
 
     // open.mp: also inject omp-client.dll after samp.dll.

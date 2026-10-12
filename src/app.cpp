@@ -21,7 +21,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr wchar_t kVersion[] = L"2.3.0";
+constexpr wchar_t kVersion[] = L"2.4.0";
 
 // Quotes a single argument per the CommandLineToArgvW / MSVCRT rules so that
 // arguments containing spaces or quotes survive the round trip into gta_sa.exe.
@@ -264,9 +264,13 @@ int App::run() {
     if (opts.monitor) {
         // gdb-lite: attach a debugger, then resume from inside the monitor so no
         // early event is missed. Blocks for the whole session.
+        monitor::DebugOptions dbg;
+        dbg.keep_all_output = opts.all_output;
+        dbg.crash_dialog = opts.crash_dialog;
+        dbg.dump = opts.dump;
+        dbg.dump_dir = paths.log.parent_path().wstring();
         mon = monitor::debug_and_wait(proc->process.get(), proc->pid, launch_tick,
-                                      [&] { launcher.resume(*proc); }, logger_,
-                                      opts.all_output);
+                                      [&] { launcher.resume(*proc); }, logger_, dbg);
     } else {
         if (!launcher.resume(*proc)) return 6;
 
@@ -294,9 +298,11 @@ int App::run() {
         std::wstring report = monitor::format_report(rc, mon);
         logger_.section(L"Report");
         logger_.raw(report);
-        if (gui && (crashed || abnormal))
-            ::MessageBoxW(nullptr, report.c_str(), L"sampcmd - GTA exited unexpectedly",
+        if (gui && (crashed || abnormal)) {
+            const std::wstring box = monitor::format_report(rc, mon, true);
+            ::MessageBoxW(nullptr, box.c_str(), L"sampcmd - GTA exited unexpectedly",
                           MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
+        }
     }
 
     logger_.section(L"Done");

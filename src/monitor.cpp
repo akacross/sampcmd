@@ -2,6 +2,7 @@
 #include "monitor.hpp"
 #include "logger.hpp"
 #include "win32_helpers.hpp"
+#include "crash_capture.hpp"
 
 #include <psapi.h>
 
@@ -297,7 +298,8 @@ Result watch(HANDLE process, uint64_t launch_tick, DWORD timeout_ms, bool wait_f
 
 Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
                       const std::function<void()>& resume, Logger& log,
-                      bool keep_all_output) {
+                      const DebugOptions& opts) {
+    const bool keep_all_output = opts.keep_all_output;
     Result r;
     r.attached = true;
     log.section(L"Monitor (gdb-lite)");
@@ -446,6 +448,59 @@ Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
                     r.fault_context = r.debug_strings;
                 }
 
+                // The first hard fault's first chance: the thread is stopped ON
+                // the faulting instruction, so this is the one moment its
+                // registers are the fault's. Read them (SA-MP's crash text), the
+                // stack's code addresses, and write the dump - once a session.
+                if (first && fault_repeats == 1 && r.crash_text.empty()) {
+                    auto t = threads.find(ev.dwThreadId);
+                    crash::Capture c = crash::capture(process, pid,
+                                                      t == threads.end() ? nullptr : t->second,
+                                                      ev.dwThreadId, er, r.modules, opts.dump,
+                                                      opts.dump_dir);
+                    r.crash_text = std::move(c.samp_lines);
+                    r.crash_returns = std::move(c.return_addrs);
+                    r.dump_path = std::move(c.dump_path);
+                    r.dump_error = std::move(c.dump_error);
+                    r.dump_bytes = c.dump_bytes;
+                    if (!r.dump_path.empty())
+                        log.infof(L"crash dump written: {} ({} KB)", r.dump_path, r.dump_bytes / 1024);
+                    else if (!r.dump_error.empty())
+                        log.warnf(L"no crash dump: {}", r.dump_error);
+                    for (const auto& line : r.crash_text) log.infof(L"crash | {}", line);
+
+                    // Hand the fault to the game: detach with the exception
+                    // event still pending, so it is dispatched as if no
+                    // debugger had been there - the game's own handlers, then
+                    // its unhandled-exception filter (SA-MP's crash dialog),
+                    // which Windows and Wine both skip while a debugger is
+                    // attached. A fault the game handles just carries on,
+                    // unwatched; the exit is still reported.
+                    if (opts.crash_dialog) {
+                        log.debugf(L"first-chance {:#010x} ({}) at {}+{:#x}{} - handing it to the game",
+                                   ec, decode_status(ec), x.module, x.module_offset, access_suffix);
+                        r.exceptions.push_back(x);
+                        if (::DebugActiveProcessStop(pid)) {
+                            r.handed_over = true;
+                            log.infof(L"detached at the fault: the game's own crash handler "
+                                      L"(SA-MP's dialog) can run - waiting for the game to end");
+                            ::WaitForSingleObject(process, INFINITE);
+                            DWORD code = 0;
+                            ::GetExitCodeProcess(process, &code);
+                            r.process_exited = true;
+                            r.exit_code = code;
+                            r.run_ms = ::GetTickCount64() - launch_tick;
+                            r.lines_after_fault = 0;
+                            log.infof(L"process exited after {} ms with status {} ({})",
+                                      r.run_ms, r.exit_code, decode_status(r.exit_code));
+                            return r;
+                        }
+                        log.warnf(L"could not detach ({}): staying attached, so SA-MP's crash "
+                                  L"dialog will not show", win32::last_error());
+                        r.exceptions.pop_back();
+                    }
+                }
+
                 // Fatal when the app didn't handle it: it arrived as last-chance,
                 // or the same first-chance fault looped back to us unresolved.
                 if (!first || fault_repeats >= 2) {
@@ -497,7 +552,7 @@ Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
     return r;
 }
 
-std::wstring format_report(const ReportContext& ctx, const Result& r) {
+std::wstring format_report(const ReportContext& ctx, const Result& r, bool compact) {
     const bool crashed = r.process_exited && is_crash_status(r.exit_code);
 
     std::wstring outcome;
@@ -536,6 +591,29 @@ std::wstring format_report(const ReportContext& ctx, const Result& r) {
 
     for (const auto& line : r.breaks)
         b += std::format(L"debug break : {}\n", line);
+
+    // A crash handler picks its own exit code, so the exit status above is
+    // what the game ended with after sampcmd let go - not a verdict.
+    if (r.handed_over)
+        b += L"handed over : sampcmd let go at the fault so the game's own crash handler "
+             L"(SA-MP's dialog) could run\n";
+    if (!r.dump_path.empty())
+        b += std::format(L"dump        : {} ({:.1f} MB)\n", r.dump_path, r.dump_bytes / 1048576.0);
+    else if (!r.dump_error.empty())
+        b += std::format(L"dump        : none - {}\n", r.dump_error);
+    if (!r.crash_returns.empty()) {
+        b += L"code on the stack (nearest the fault first):\n";
+        for (const auto& line : r.crash_returns) b += std::format(L"  {}\n", line);
+    }
+    if (!r.crash_text.empty()) {
+        // What SA-MP's own crash dialog shows, in its format. The message box
+        // gets the head of it; the 40-line stack dump is the log's.
+        b += L"SA-MP crash info:\n";
+        for (const auto& line : r.crash_text) {
+            if (compact && line.starts_with(L"+")) continue;
+            b += std::format(L"  {}\n", line);
+        }
+    }
 
     if (r.attached)
         b += std::format(L"modules     : {} loaded | samp.dll {}\n",

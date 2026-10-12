@@ -68,6 +68,34 @@ struct Result {
     // the text the registers and the stack held at the break.
     std::vector<std::wstring> breaks;
     std::vector<ModuleRec>    modules;
+
+    // The first hard fault, read while its thread was still stopped on it
+    // (crash_capture): what SA-MP's own crash dialog shows, the code
+    // addresses on that stack, and the minidump.
+    std::vector<std::wstring> crash_text;
+    std::vector<std::wstring> crash_returns;
+    std::wstring dump_path;
+    std::wstring dump_error;
+    uint64_t     dump_bytes = 0;
+    // Detached at that fault so the game's own unhandled-exception filter -
+    // SA-MP's crash dialog - could run. A debugger being attached is exactly
+    // what makes Windows (and Wine) skip that filter.
+    bool         handed_over = false;
+};
+
+enum class DumpKind { none, mini, full };
+
+struct DebugOptions {
+    // Report every OutputDebugString line, including the ones a third-party
+    // log mirror (cleo.asi) floods the debug channel with. They are always
+    // written to the trace log either way.
+    bool         keep_all_output = false;
+    // At the first hard fault: capture, then detach and let the game's own
+    // crash handler run (SA-MP's dialog). Off: stay attached and terminate the
+    // game once the fault proves unhandled (the 2.3 behaviour).
+    bool         crash_dialog = true;
+    DumpKind     dump = DumpKind::mini;
+    std::wstring dump_dir;    // where sampcmd-crash-*.dmp go (the log's folder)
 };
 
 // Static facts the report header needs (the launcher knows these).
@@ -93,14 +121,13 @@ Result watch(HANDLE process, uint64_t launch_tick, DWORD timeout_ms, bool wait_f
 // invoked once the debugger is attached so no early event is missed. Blocks
 // until the process exits (whole session).
 //
-// keep_all_output: report every OutputDebugString line, including the ones a
-// third-party log mirror (cleo.asi) floods the debug channel with. They are
-// always written to the trace log either way.
+// See DebugOptions for what can be chosen.
 Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
                       const std::function<void()>& resume, Logger& log,
-                      bool keep_all_output = false);
+                      const DebugOptions& opts = {});
 
-// Builds the paste-ready report block.
-std::wstring format_report(const ReportContext& ctx, const Result& r);
+// Builds the paste-ready report block. `compact` leaves out the stack dump
+// (the message box; the log always has all of it).
+std::wstring format_report(const ReportContext& ctx, const Result& r, bool compact = false);
 
 } // namespace monitor

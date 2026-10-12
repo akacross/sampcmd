@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(sampcmd LANGUAGES CXX RC VERSION 2.3.0)
+project(sampcmd LANGUAGES CXX RC VERSION 2.4.0)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,6 +34,7 @@ add_executable(sampcmd
   src/host_resolver.cpp
   src/host_cache.cpp
   src/monitor.cpp
+  src/crash_capture.cpp
   res/sampcmd.rc
 )
 
