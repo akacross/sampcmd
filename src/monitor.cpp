@@ -272,6 +272,17 @@ std::wstring describe_access(const ExceptionRec& ex) {
     return std::format(L"{} 0x{:08X}{}", verb, ex.access_address, where);
 }
 
+// The common __fastfail codes (winnt.h FAST_FAIL_*).
+static std::wstring describe_fast_fail(ULONG_PTR code) {
+    switch (code) {
+        case 2:  return L" (FAST_FAIL_STACK_COOKIE_CHECK_FAILURE: a /GS stack cookie was overwritten)";
+        case 5:  return L" (FAST_FAIL_INVALID_ARG: the CRT's invalid parameter handler)";
+        case 7:  return L" (FAST_FAIL_FATAL_APP_EXIT: abort(), as from std::terminate)";
+        case 10: return L" (FAST_FAIL_GUARD_ICALL_CHECK_FAILURE: a CFG check failed)";
+        default: return L"";
+    }
+}
+
 std::wstring decode_status(DWORD code) {
     switch (code) {
         case 0x00000000: return L"OK (normal exit)";
@@ -360,9 +371,33 @@ Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
     // The debug output around the first hard fault is what actually explains a
     // crash; the ring buffer alone would have rotated it away by exit time.
     bool      fault_context_taken = false;
+    // The crash capture (registers, stack, dump) is taken once a session.
+    bool      crash_captured = false;
     // Thread handles by id, from the create events (the debugger owns them),
     // so a debug break can read its thread's registers.
     std::unordered_map<DWORD, HANDLE> threads;
+
+    // Read the faulting thread (SA-MP's crash text, the code on its stack) and
+    // write the dump, while that thread is still stopped on the fault.
+    auto capture_crash = [&](const DEBUG_EVENT& ev, const EXCEPTION_RECORD& er) {
+        crash_captured = true;
+        auto t = threads.find(ev.dwThreadId);
+        crash::Capture c = crash::capture(process, pid,
+                                          t == threads.end() ? nullptr : t->second,
+                                          ev.dwThreadId, er, r.modules, opts.dump,
+                                          opts.dump_dir);
+        r.crash_text = std::move(c.samp_lines);
+        r.crash_returns = std::move(c.return_addrs);
+        r.dump_path = std::move(c.dump_path);
+        r.dump_error = std::move(c.dump_error);
+        r.dump_bytes = c.dump_bytes;
+        if (!r.dump_path.empty())
+            log.infof(L"crash dump written: {} ({} KB)", r.dump_path, r.dump_bytes / 1024);
+        else if (!r.dump_error.empty())
+            log.warnf(L"no crash dump: {}", r.dump_error);
+        for (const auto& line : r.crash_text) log.infof(L"crash | {}", line);
+        for (const auto& line : r.crash_returns) log.infof(L"crash stack | {}", line);
+    };
 
     for (;;) {
         DEBUG_EVENT ev{};
@@ -472,8 +507,9 @@ Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
                     ++fault_repeats;
                 else { fault_repeats = 1; last_fault_code = ec; last_fault_addr = addr; }
 
-                // Name things by the loader's list as it is NOW (see refresh_modules).
-                if (first && fault_repeats == 1) refresh_modules(r.modules, process);
+                // Name things by the loader's list as it is NOW (see refresh_modules);
+                // a __fastfail arrives last-chance without a first.
+                if (fault_repeats == 1) refresh_modules(r.modules, process);
 
                 ExceptionRec x;
                 x.code = ec; x.address = addr; x.first_chance = first;
@@ -494,22 +530,8 @@ Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
                 // the faulting instruction, so this is the one moment its
                 // registers are the fault's. Read them (SA-MP's crash text), the
                 // stack's code addresses, and write the dump - once a session.
-                if (first && fault_repeats == 1 && r.crash_text.empty()) {
-                    auto t = threads.find(ev.dwThreadId);
-                    crash::Capture c = crash::capture(process, pid,
-                                                      t == threads.end() ? nullptr : t->second,
-                                                      ev.dwThreadId, er, r.modules, opts.dump,
-                                                      opts.dump_dir);
-                    r.crash_text = std::move(c.samp_lines);
-                    r.crash_returns = std::move(c.return_addrs);
-                    r.dump_path = std::move(c.dump_path);
-                    r.dump_error = std::move(c.dump_error);
-                    r.dump_bytes = c.dump_bytes;
-                    if (!r.dump_path.empty())
-                        log.infof(L"crash dump written: {} ({} KB)", r.dump_path, r.dump_bytes / 1024);
-                    else if (!r.dump_error.empty())
-                        log.warnf(L"no crash dump: {}", r.dump_error);
-                    for (const auto& line : r.crash_text) log.infof(L"crash | {}", line);
+                if (first && fault_repeats == 1 && !crash_captured) {
+                    capture_crash(ev, er);
 
                     // Hand the fault to the game: detach with the exception
                     // event still pending, so it is dispatched as if no
@@ -546,9 +568,18 @@ Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
                 // Fatal when the app didn't handle it: it arrived as last-chance,
                 // or the same first-chance fault looped back to us unresolved.
                 if (!first || fault_repeats >= 2) {
-                    log.errorf(L"unhandled {:#010x} ({}) at {}+{:#x}{} - terminating target",
+                    // __fastfail (int 29h: abort(), a failed /GS cookie, ...)
+                    // reaches a debugger as last-chance only, never first: its
+                    // thread is stopped on it now, so capture it here.
+                    if (!crash_captured)
+                        capture_crash(ev, er);
+                    std::wstring fast_fail;
+                    if (ec == 0xC0000409 && er.NumberParameters >= 1)
+                        fast_fail = std::format(L" - fast fail code {}{}", er.ExceptionInformation[0],
+                                                describe_fast_fail(er.ExceptionInformation[0]));
+                    log.errorf(L"unhandled {:#010x} ({}) at {}+{:#x}{}{} - terminating target",
                                ec, decode_status(ec), x.module, x.module_offset,
-                               access_suffix);
+                               access_suffix, fast_fail);
                     // Re-anchor the output snapshot on the fault that actually
                     // killed the game, not on some earlier one the app handled.
                     r.fault_context = r.debug_strings;

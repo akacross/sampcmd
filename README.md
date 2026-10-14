@@ -267,6 +267,13 @@ Now, at the **first hard fault** (an access violation, an illegal instruction -
 `--no-crash-dialog` keeps the 2.3 behaviour: stay attached, and end the game
 once the fault proves unhandled (steps 1-3 still happen).
 
+A `__fastfail` (`0xC0000409`: `abort()`, as from `std::terminate`, or a failed
+`/GS` stack cookie) never has a first chance: it reaches the debugger
+last-chance only. Since 2.4.2 sampcmd takes steps 1-3 there too, before ending
+the game, and the log names the fast fail code. The code on the stack is read
+from 4 KB of it, not only SA-MP's 0x280 bytes, since an `abort()` sits deep
+under the C runtime's frames.
+
 The report then carries, after the fault line:
 
 ```

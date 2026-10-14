@@ -20,7 +20,10 @@ constexpr uintptr_t kR5LDbg        = 0x26B560;   // int,   "lDbg: %d"
 constexpr uintptr_t kR5LastRendObj = 0x1516EC;   // WORD,  "LastRendObj: %u"
 constexpr uintptr_t kR5GameVersion = 0x26EB28;   // int: 1 US 1.0, 2 EU 1.0
 constexpr size_t    kStackBytes    = 0x280;      // what the handler dumps from ESP
-constexpr size_t    kMaxReturns    = 24;
+constexpr size_t    kMaxReturns    = 40;
+// further than SA-MP's block: a fault deep in the CRT (abort from
+// std::terminate at exit) has its caller well beyond 0x280 bytes
+constexpr size_t    kReturnScanBytes = 0x1000;
 
 template <typename T>
 bool read(HANDLE process, uintptr_t addr, T& out) {
@@ -213,7 +216,7 @@ Capture capture(HANDLE process, DWORD pid, HANDLE thread, DWORD tid,
             L.push_back(std::move(line));
         }
         // the candidates for "who called this", nearest the fault first
-        for (size_t off = 0; off < kStackBytes && out.return_addrs.size() < kMaxReturns; off += 4) {
+        for (size_t off = 0; off < kReturnScanBytes && out.return_addrs.size() < kMaxReturns; off += 4) {
             DWORD v = 0;
             if (!read(process, ctx.Esp + off, v)) continue;
             const monitor::ModuleRec* m = module_at(process, modules, v);
