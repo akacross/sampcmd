@@ -519,6 +519,28 @@ Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
                 const bool hard = (ec & 0xF0000000u) == 0xC0000000u;
                 if (!hard) { cont = DBG_EXCEPTION_NOT_HANDLED; break; }
 
+                // A first touch of reserved memory: the game's own handler commits
+                // the page (the limit adjuster's unlimited arrays). Unhandled ones
+                // come back as last chance.
+                if (first && ec == EXCEPTION_ACCESS_VIOLATION && er.NumberParameters >= 2) {
+                    MEMORY_BASIC_INFORMATION mbi{};
+                    const auto target = reinterpret_cast<LPCVOID>(er.ExceptionInformation[1]);
+                    if (::VirtualQueryEx(process, target, &mbi, sizeof mbi) && mbi.State == MEM_RESERVE) {
+                        static unsigned reserved_faults;
+                        if (++reserved_faults <= 3) {
+                            ExceptionRec x;
+                            x.code = ec;
+                            x.address = reinterpret_cast<uintptr_t>(er.ExceptionAddress);
+                            locate(r.modules, x);
+                            log.debugf(L"first touch of reserved memory at {:#010x} from {}+{:#x}: "
+                                       L"passed to the game, which commits it",
+                                       reinterpret_cast<uintptr_t>(target), x.module, x.module_offset);
+                        }
+                        cont = DBG_EXCEPTION_NOT_HANDLED;
+                        break;
+                    }
+                }
+
                 const uintptr_t addr = reinterpret_cast<uintptr_t>(er.ExceptionAddress);
                 if (first && ec == last_fault_code && addr == last_fault_addr)
                     ++fault_repeats;

@@ -300,6 +300,13 @@ continues, as the game would without it, instead of handing them to the game
 as a crash: at exit, CLEO 4's IntOperations.cleo closes a dead handle, and the
 crash path then hung the game during its DLL teardown.
 
+An access violation on reserved but uncommitted memory is passed to the game
+on its first chance (since 2.4.4). Open Limit Adjuster 2.0's unlimited arrays
+reserve address space and commit each page from a vectored exception handler
+on first touch; sampcmd hears of the fault before that handler runs and used to
+report it as a crash (in `CCoronas::Init`). If nothing commits the page, the
+fault comes back as last chance and is reported as before.
+
 ### A note on the captured output
 
 `OutputDebugString` is a process-wide channel, and attaching the debugger makes
