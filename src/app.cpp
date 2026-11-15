@@ -21,7 +21,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr wchar_t kVersion[] = L"2.4.2";
+constexpr wchar_t kVersion[] = L"2.4.3";
 
 // Quotes a single argument per the CommandLineToArgvW / MSVCRT rules so that
 // arguments containing spaces or quotes survive the round trip into gta_sa.exe.

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(sampcmd LANGUAGES CXX RC VERSION 2.4.2)
+project(sampcmd LANGUAGES CXX RC VERSION 2.4.3)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

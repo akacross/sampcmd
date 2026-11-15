@@ -293,6 +293,13 @@ SA-MP crash info:
 
 The message box leaves out the 40-line stack dump; the log has all of it.
 
+A bad handle passed to CloseHandle and similar calls raises
+`0xC0000008` (`STATUS_INVALID_HANDLE`) or `0xC0000235` only while a debugger is
+attached; without one the call just fails. Since 2.4.3 sampcmd logs these and
+continues, as the game would without it, instead of handing them to the game
+as a crash: at exit, CLEO 4's IntOperations.cleo closes a dead handle, and the
+crash path then hung the game during its DLL teardown.
+
 ### A note on the captured output
 
 `OutputDebugString` is a process-wide channel, and attaching the debugger makes

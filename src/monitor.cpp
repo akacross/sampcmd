@@ -495,6 +495,23 @@ Result debug_and_wait(HANDLE process, DWORD pid, uint64_t launch_tick,
                     break;
                 }
 
+                // A bad handle given to CloseHandle and the like: Windows and Wine
+                // raise these only while a debugger is attached; without one the
+                // call just fails. Carry on as it would. Handing one to the game
+                // as a crash sends it down the crash path, and during the DLL
+                // teardown at exit that hangs the game (CLEO 4's
+                // IntOperations.cleo closes a dead handle there).
+                if (ec == 0xC0000008 /*INVALID_HANDLE*/ || ec == 0xC0000235 /*HANDLE_NOT_CLOSABLE*/) {
+                    ExceptionRec x;
+                    x.code = ec;
+                    x.address = reinterpret_cast<uintptr_t>(er.ExceptionAddress);
+                    locate(r.modules, x);
+                    log.debugf(L"{:#010x} ({}) at {}+{:#x}: raised only for a debugger, ignored",
+                               ec, decode_status(ec), x.module, x.module_offset);
+                    cont = DBG_CONTINUE;
+                    break;
+                }
+
                 // Hard faults are NTSTATUS 0xC0000xxx (access violation, illegal
                 // instruction, ...). Benign first-chance exceptions - C++/CLR EH
                 // (0xE.......), thread-name (0x406D1388), guard-page - are passed
